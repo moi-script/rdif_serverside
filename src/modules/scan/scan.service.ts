@@ -1,9 +1,9 @@
 import { Types } from 'mongoose';
 import { scanRepo } from './scan.repository';
 import { attendanceRepo } from '../attendance/attendance.repository';
-import { PersonModel } from '../persons/persons.model';
-import { VehicleModel } from '../vehicles/vehicles.model';
-import { GateModel } from '../gates/gates.model';
+import { personRepo } from '../persons/persons.repository';
+import { vehicleRepo } from '../vehicles/vehicles.repository';
+import { gateRepo } from '../gates/gates.repository';
 import { ApiError } from '../../utils/ApiError';
 import { env } from '../../config/env';
 
@@ -21,7 +21,10 @@ interface TapResult {
 }
 
 function dateKey(d: Date): string {
-  return d.toISOString().slice(0, 10);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
 }
 
 function isLate(when: Date): boolean {
@@ -33,13 +36,13 @@ function isLate(when: Date): boolean {
 
 export const scanService = {
   async tap(input: TapInput): Promise<TapResult> {
-    const gate = await GateModel.findById(input.gate_id).lean();
+    const gate = await gateRepo.findById(input.gate_id);
     if (!gate) throw new ApiError('NOT_FOUND', 'Gate not found');
 
     const scan_time = new Date();
 
     // Resolve entity by RFID: person first, then vehicle
-    const person = await PersonModel.findOne({ rfid_uid: input.rfid_uid }).lean();
+    const person = await personRepo.findByRfid(input.rfid_uid);
     let entity_type: 'person' | 'vehicle' = 'person';
     let entity_id: Types.ObjectId | null = null;
     let access_result: 'granted' | 'denied' = 'denied';
@@ -58,7 +61,7 @@ export const scanService = {
         reason = 'inactive_id';
       }
     } else {
-      const vehicle = await VehicleModel.findOne({ rfid_uid: input.rfid_uid }).lean();
+      const vehicle = await vehicleRepo.findByRfid(input.rfid_uid);
       if (vehicle) {
         entity_type = 'vehicle';
         entity_id = vehicle._id;
