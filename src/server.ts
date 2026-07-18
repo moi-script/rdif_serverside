@@ -1,0 +1,27 @@
+import { createApp } from './app';
+import { connectDB, disconnectDB } from './config/db';
+import { env } from './config/env';
+
+async function bootstrap(): Promise<void> {
+  await connectDB();
+  const app = createApp();
+  const server = app.listen(env.PORT, () => {
+    console.log(`[server] listening on port ${env.PORT} (${env.NODE_ENV})`);
+  });
+
+  const shutdown = async (signal: string) => {
+    console.log(`[server] ${signal} received, shutting down`);
+    server.close(async () => {
+      await disconnectDB();
+      process.exit(0);
+    });
+  };
+
+  process.on('SIGINT', () => void shutdown('SIGINT'));
+  process.on('SIGTERM', () => void shutdown('SIGTERM'));
+}
+
+bootstrap().catch((err) => {
+  console.error('[server] failed to start', err);
+  process.exit(1);
+});
