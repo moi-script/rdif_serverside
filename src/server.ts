@@ -15,6 +15,10 @@ async function bootstrap(): Promise<void> {
       await disconnectDB();
       process.exit(0);
     });
+    setTimeout(() => {
+      console.error('[server] forced shutdown after timeout');
+      process.exit(1);
+    }, 10000).unref();
   };
 
   process.on('SIGINT', () => void shutdown('SIGINT'));

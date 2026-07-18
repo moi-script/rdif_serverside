@@ -8,7 +8,7 @@ export interface IGate extends Document {
 }
 
 const gateSchema = new Schema<IGate>({
-  name: { type: String, required: true },
+  name: { type: String, required: true, unique: true },
   type: { type: String, enum: ['person', 'vehicle'], required: true },
   location: { type: String },
 });

@@ -15,6 +15,12 @@ export function errorHandler(err: unknown, req: Request, res: Response, _next: N
     return;
   }
 
+  // Mongoose CastError (malformed ObjectId in a route param)
+  if (typeof err === 'object' && err !== null && (err as { name?: string }).name === 'CastError') {
+    res.status(422).json({ success: false, code: 'VALIDATION_ERROR', message: 'Invalid identifier' });
+    return;
+  }
+
   console.error('[error]', err);
   const message = env.isProd ? 'Internal server error' : String((err as Error)?.message ?? err);
   res.status(500).json({ success: false, code: 'INTERNAL_ERROR', message });

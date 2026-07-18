@@ -8,5 +8,5 @@ import { loginController, refreshController, logoutController } from './auth.con
 export const authRoutes = Router();
 
 authRoutes.post('/login', loginLimiter, validate(loginSchema), loginController);
-authRoutes.post('/refresh', refreshController);
+authRoutes.post('/refresh', loginLimiter, refreshController);
 authRoutes.post('/logout', authenticate, logoutController);

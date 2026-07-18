@@ -6,12 +6,21 @@ export const attendanceRepo = {
   findByPersonAndDate: (person_id: string, date: string) =>
     AttendanceModel.findOne({ person_id, date }),
 
-  upsertTimeIn: (person_id: string, date: string, when: Date, status: 'present' | 'late') =>
-    AttendanceModel.findOneAndUpdate(
-      { person_id, date },
-      { $setOnInsert: { time_in: when, status } },
-      { upsert: true, new: true }
-    ),
+  upsertTimeIn: async (person_id: string, date: string, when: Date, status: 'present' | 'late') => {
+    try {
+      return await AttendanceModel.findOneAndUpdate(
+        { person_id, date, $or: [{ time_in: null }, { time_in: { $exists: false } }] },
+        { $set: { time_in: when, status } },
+        { upsert: true, new: true }
+      );
+    } catch (err: unknown) {
+      // A row already exists WITH a time_in (filter didn't match) → that's fine, return it.
+      if (typeof err === 'object' && err !== null && (err as { code?: number }).code === 11000) {
+        return AttendanceModel.findOne({ person_id, date });
+      }
+      throw err;
+    }
+  },
 
   upsertTimeOut: (person_id: string, date: string, when: Date) =>
     AttendanceModel.findOneAndUpdate(
