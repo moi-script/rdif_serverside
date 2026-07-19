@@ -19,3 +19,7 @@ export const statusSchema = z.object({ status: z.enum(['active', 'inactive']) })
 export const reassignRfidSchema = z.object({
   rfid_uid: z.string().regex(/^[0-9A-Fa-f]+$/, 'rfid_uid must be hex'),
 });
+
+export const importPersonsSchema = z.object({
+  rows: z.array(createPersonSchema).min(1).max(500),
+});

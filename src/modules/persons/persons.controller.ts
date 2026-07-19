@@ -28,6 +28,9 @@ export const personController = {
   create: asyncHandler(async (req: Request, res: Response) => {
     sendSuccess(res, await personService.create(req.body), 201);
   }),
+  import: asyncHandler(async (req: Request, res: Response) => {
+    sendSuccess(res, await personService.import(req.body.rows), 201);
+  }),
   update: asyncHandler(async (req: Request, res: Response) => {
     sendSuccess(res, await personService.update(req.params.id, req.body));
   }),

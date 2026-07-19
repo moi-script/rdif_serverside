@@ -9,6 +9,7 @@ import {
   updatePersonSchema,
   statusSchema,
   reassignRfidSchema,
+  importPersonsSchema,
 } from './persons.schema';
 
 export const personRoutes = Router();
@@ -19,6 +20,7 @@ personRoutes.get('/sections', personController.sections);
 personRoutes.get('/:id/overview', personController.overview);
 personRoutes.get('/:id', personController.get);
 personRoutes.post('/', validate(createPersonSchema), personController.create);
+personRoutes.post('/import', validate(importPersonsSchema), personController.import);
 personRoutes.patch('/:id', validate(updatePersonSchema), personController.update);
 personRoutes.patch('/:id/status', validate(statusSchema), personController.setStatus);
 personRoutes.patch('/:id/rfid', validate(reassignRfidSchema), personController.reassignRfid);
