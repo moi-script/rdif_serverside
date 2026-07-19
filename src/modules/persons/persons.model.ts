@@ -8,8 +8,8 @@ export interface IPerson extends Document {
   department_section: string;
   contact_email?: string;
   photo_url?: string;
-  rfid_uid: string;
-  status: 'active' | 'inactive';
+  rfid_uid?: string;
+  status: 'active' | 'inactive' | 'pending';
   createdAt: Date;
   updatedAt: Date;
 }
@@ -22,8 +22,13 @@ const personSchema = new Schema<IPerson>(
     department_section: { type: String },
     contact_email: { type: String },
     photo_url: { type: String },
-    rfid_uid: { type: String, required: true, unique: true },
-    status: { type: String, enum: ['active', 'inactive'], default: 'active', index: true },
+    rfid_uid: { type: String, unique: true, sparse: true },
+    status: {
+      type: String,
+      enum: ['active', 'inactive', 'pending'],
+      default: 'active',
+      index: true,
+    },
   },
   { timestamps: true }
 );

@@ -39,8 +39,12 @@ export const personService = {
   },
 
   async create(data: Partial<IPerson>) {
-    const existing = await personRepo.findByRfid(data.rfid_uid as string);
-    if (existing) throw new ApiError('DUPLICATE_RFID');
+    if (data.rfid_uid) {
+      const existing = await personRepo.findByRfid(data.rfid_uid);
+      if (existing) throw new ApiError('DUPLICATE_RFID');
+    } else {
+      data.status = data.status ?? 'pending';
+    }
     return personRepo.create(data);
   },
 

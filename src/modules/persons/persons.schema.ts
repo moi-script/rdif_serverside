@@ -7,8 +7,11 @@ export const createPersonSchema = z.object({
   department_section: z.string().optional(),
   contact_email: z.string().email().optional(),
   photo_url: z.string().url().optional(),
-  rfid_uid: z.string().regex(/^[0-9A-Fa-f]+$/, 'rfid_uid must be hex'),
-  status: z.enum(['active', 'inactive']).optional(),
+  rfid_uid: z
+    .string()
+    .regex(/^[0-9A-Fa-f]+$/, 'rfid_uid must be hex')
+    .optional(),
+  status: z.enum(['active', 'inactive', 'pending']).optional(),
 });
 
 export const updatePersonSchema = createPersonSchema.partial().omit({ rfid_uid: true });
