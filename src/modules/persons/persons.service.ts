@@ -9,6 +9,7 @@ interface ListQuery {
   limit?: string;
   type?: string;
   status?: string;
+  section?: string;
   search?: string;
 }
 
@@ -18,9 +19,17 @@ export const personService = {
     const filter: FilterQuery<IPerson> = {};
     if (query.type) filter.type = query.type;
     if (query.status) filter.status = query.status;
-    if (query.search) filter.full_name = { $regex: query.search, $options: 'i' };
+    if (query.section) filter.department_section = query.section;
+    if (query.search) {
+      const rx = { $regex: query.search, $options: 'i' };
+      filter.$or = [{ full_name: rx }, { id_number: rx }];
+    }
     const { items, total } = await personRepo.findPaginated(filter, p);
     return { items, meta: buildMeta(total, p.page, p.limit) };
+  },
+
+  async sections(type?: string) {
+    return personRepo.distinctSections(type);
   },
 
   async get(id: string) {

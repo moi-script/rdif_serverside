@@ -1,11 +1,16 @@
 import bcrypt from 'bcrypt';
+import { Types } from 'mongoose';
 import { connectDB, disconnectDB } from './db';
 import { UserModel } from '../modules/users/users.model';
-import { PersonModel } from '../modules/persons/persons.model';
+import { PersonModel, IPerson } from '../modules/persons/persons.model';
+import { GateModel } from '../modules/gates/gates.model';
+import { VehicleModel } from '../modules/vehicles/vehicles.model';
+import { AttendanceModel } from '../modules/attendance/attendance.model';
+import { ScanLogModel } from '../modules/scan/scan.model';
 import { ROLES } from '../constants/roles';
 
 /**
- * Hardcoded test accounts for the testing phase.
+ * Hardcoded test accounts + demo activity for the testing phase.
  * Run with: npm run seed:test
  * Idempotent — safe to run multiple times.
  */
@@ -15,12 +20,20 @@ const HARDCODED_ADMIN = {
   password: 'Admin@123',
 };
 
-// Student login username = their student number (id_number),
-// so the client "Student number" field matches the users table directly.
-const HARDCODED_STUDENTS = [
+// Login username = id_number, so the client "Student number" field matches the users table.
+const HARDCODED_PEOPLE: {
+  password: string;
+  full_name: string;
+  type: 'student' | 'staff';
+  id_number: string;
+  department_section: string;
+  contact_email: string;
+  rfid_uid: string;
+}[] = [
   {
     password: 'Student@123',
     full_name: 'Juan Dela Cruz',
+    type: 'student',
     id_number: '2025-0001',
     department_section: 'BSIT - 4A',
     contact_email: 'juan.delacruz@student.ncst.edu.ph',
@@ -29,6 +42,7 @@ const HARDCODED_STUDENTS = [
   {
     password: 'Student@123',
     full_name: 'Maria Santos',
+    type: 'student',
     id_number: '2025-0002',
     department_section: 'BSCS - 3B',
     contact_email: 'maria.santos@student.ncst.edu.ph',
@@ -37,15 +51,261 @@ const HARDCODED_STUDENTS = [
   {
     password: 'Student@123',
     full_name: 'Pedro Reyes',
+    type: 'student',
     id_number: '2025-0003',
     department_section: 'BSIT - 2C',
     contact_email: 'pedro.reyes@student.ncst.edu.ph',
     rfid_uid: 'RFID-STU-0003',
   },
+  {
+    password: 'Staff@123',
+    full_name: 'Ana Villanueva',
+    type: 'staff',
+    id_number: 'EMP-1001',
+    department_section: 'Registrar Office',
+    contact_email: 'ana.villanueva@ncst.edu.ph',
+    rfid_uid: 'RFID-STF-1001',
+  },
+];
+
+const GATES = [
+  { name: 'Main Entrance', type: 'person' as const, location: 'Front Building Gate A' },
+  { name: 'Side Gate', type: 'person' as const, location: 'South Wing Gate B' },
+  { name: 'Parking Entrance', type: 'vehicle' as const, location: 'Parking Lot Entry' },
+  { name: 'Parking Exit', type: 'vehicle' as const, location: 'Parking Lot Exit' },
 ];
 
 // Old-style usernames from the first seed run — remove so logins are clean.
 const LEGACY_STUDENT_USERNAMES = ['student1', 'student2', 'student3'];
+
+function ymd(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function at(base: Date, h: number, m: number): Date {
+  const x = new Date(base);
+  x.setHours(h, m, 0, 0);
+  return x;
+}
+
+/** The last `n` calendar days, most recent first (index 0 = today), at local midnight. */
+function lastDays(n: number): Date[] {
+  const days: Date[] = [];
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  for (let i = 0; i < n; i++) {
+    days.push(new Date(d));
+    d.setDate(d.getDate() - 1);
+  }
+  return days;
+}
+
+async function ensurePerson(
+  p: (typeof HARDCODED_PEOPLE)[number]
+): Promise<IPerson> {
+  let person = await PersonModel.findOne({ rfid_uid: p.rfid_uid });
+  if (person) {
+    console.log(`[test-seed] person '${p.full_name}' already exists — skipping profile`);
+  } else {
+    person = await PersonModel.create({
+      full_name: p.full_name,
+      type: p.type,
+      id_number: p.id_number,
+      department_section: p.department_section,
+      contact_email: p.contact_email,
+      rfid_uid: p.rfid_uid,
+      status: 'active',
+    });
+    console.log(`[test-seed] created ${p.type} '${p.full_name}' (rfid: ${p.rfid_uid})`);
+  }
+
+  const existingUser = await UserModel.findOne({ username: p.id_number });
+  if (existingUser) {
+    console.log(`[test-seed] user '${p.id_number}' already exists — skipping login`);
+  } else {
+    const password_hash = await bcrypt.hash(p.password, 12);
+    await UserModel.create({
+      username: p.id_number,
+      password_hash,
+      role: ROLES.USER,
+      person_id: person._id,
+      must_change_password: false,
+      is_active: true,
+    });
+    console.log(`[test-seed] created ${p.type} login '${p.id_number}' (password: ${p.password})`);
+  }
+  return person;
+}
+
+async function seedDemoActivity(persons: IPerson[]): Promise<void> {
+  // Gates (idempotent by name)
+  const gateMap: Record<string, Types.ObjectId> = {};
+  for (const g of GATES) {
+    let gate = await GateModel.findOne({ name: g.name });
+    if (!gate) {
+      gate = await GateModel.create(g);
+      console.log(`[test-seed] created gate '${g.name}'`);
+    }
+    gateMap[g.name] = gate._id;
+  }
+
+  // Vehicles for a couple of people (idempotent by owner)
+  const vehicleOwners: { id_number: string; plate: string; rfid: string; type: string; model: string }[] = [
+    { id_number: '2025-0001', plate: 'NCST-1234', rfid: 'RFID-VEH-0001', type: 'Motorcycle', model: 'Honda Click 125i' },
+    { id_number: 'EMP-1001', plate: 'NCST-5678', rfid: 'RFID-VEH-0002', type: 'Car', model: 'Toyota Vios' },
+  ];
+  const vehicleDocs: { rfid: string; ownerId: Types.ObjectId }[] = [];
+  for (const v of vehicleOwners) {
+    const owner = persons.find((p) => p.id_number === v.id_number);
+    if (!owner) continue;
+    let vehicle = await VehicleModel.findOne({ owner_person_id: owner._id });
+    if (!vehicle) {
+      vehicle = await VehicleModel.create({
+        owner_person_id: owner._id,
+        plate_number: v.plate,
+        rfid_uid: v.rfid,
+        vehicle_type: v.type,
+        vehicle_model: v.model,
+        status: 'active',
+      });
+      console.log(`[test-seed] created vehicle '${v.plate}' for ${owner.full_name}`);
+    }
+    vehicleDocs.push({ rfid: v.rfid, ownerId: vehicle._id });
+  }
+
+  // Attendance + scan history. Re-run with SEED_RESET=1 to wipe and regenerate.
+  if (process.env.SEED_RESET === '1') {
+    await ScanLogModel.deleteMany({});
+    await AttendanceModel.deleteMany({});
+    console.log('[test-seed] SEED_RESET=1 → cleared existing scans + attendance');
+  }
+  const scanCount = await ScanLogModel.countDocuments({});
+  if (scanCount > 0) {
+    console.log('[test-seed] scan logs already present — skipping demo activity');
+    return;
+  }
+
+  const days = lastDays(8);
+  const mainGate = gateMap['Main Entrance'];
+  const sideGate = gateMap['Side Gate'];
+
+  const attendanceDocs: Record<string, unknown>[] = [];
+  const scanDocs: Record<string, unknown>[] = [];
+
+  persons.forEach((person, pIdx) => {
+    days.forEach((day, dIdx) => {
+      const roll = (pIdx + dIdx) % 7;
+      if (roll === 3) return; // absent day → no scan / attendance
+      const late = roll === 5;
+      const isToday = dIdx === 0;
+
+      const timeIn = isToday
+        ? new Date(Date.now() - (2 + pIdx) * 60 * 1000) // arrived a few minutes ago
+        : at(day, late ? 8 : 7, late ? 20 : 40);
+      const timeOut = isToday ? null : at(day, 16, 30 + (dIdx % 25));
+
+      attendanceDocs.push({
+        person_id: person._id,
+        date: ymd(day),
+        time_in: timeIn,
+        time_out: timeOut,
+        status: late ? 'late' : 'present',
+      });
+
+      scanDocs.push({
+        rfid_uid: person.rfid_uid,
+        entity_type: 'person',
+        entity_id: person._id,
+        gate_id: mainGate,
+        direction: 'entry',
+        access_result: 'granted',
+        reason: null,
+        scan_time: timeIn,
+      });
+      if (timeOut) {
+        scanDocs.push({
+          rfid_uid: person.rfid_uid,
+          entity_type: 'person',
+          entity_id: person._id,
+          gate_id: sideGate,
+          direction: 'exit',
+          access_result: 'granted',
+          reason: null,
+          scan_time: timeOut,
+        });
+      }
+    });
+  });
+
+  // Parking (vehicle) scans at the parking gates, resolved to owner names.
+  const parkingIn = gateMap['Parking Entrance'];
+  const parkingOut = gateMap['Parking Exit'];
+  vehicleDocs.forEach((v, vIdx) => {
+    days.slice(0, 5).forEach((day, dIdx) => {
+      const isToday = dIdx === 0;
+      const inTime = isToday
+        ? new Date(Date.now() - (5 + vIdx) * 60 * 1000)
+        : at(day, 7, 35 + vIdx * 3);
+      const outTime = isToday ? null : at(day, 17, 5 + vIdx * 4);
+      scanDocs.push({
+        rfid_uid: v.rfid,
+        entity_type: 'vehicle',
+        entity_id: v.ownerId,
+        gate_id: parkingIn,
+        direction: 'entry',
+        access_result: 'granted',
+        reason: null,
+        scan_time: inTime,
+      });
+      if (outTime) {
+        scanDocs.push({
+          rfid_uid: v.rfid,
+          entity_type: 'vehicle',
+          entity_id: v.ownerId,
+          gate_id: parkingOut,
+          direction: 'exit',
+          access_result: 'granted',
+          reason: null,
+          scan_time: outTime,
+        });
+      }
+    });
+  });
+
+  // A couple of denied taps today (unregistered cards) for the admin feed.
+  const now = Date.now();
+  scanDocs.push(
+    {
+      rfid_uid: 'RFID-UNKNOWN-1',
+      entity_type: 'person',
+      entity_id: null,
+      gate_id: mainGate,
+      direction: 'entry',
+      access_result: 'denied',
+      reason: 'unregistered_uid',
+      scan_time: new Date(now - 18 * 60 * 1000),
+    },
+    {
+      rfid_uid: 'RFID-UNKNOWN-2',
+      entity_type: 'person',
+      entity_id: null,
+      gate_id: sideGate,
+      direction: 'entry',
+      access_result: 'denied',
+      reason: 'unregistered_uid',
+      scan_time: new Date(now - 42 * 60 * 1000),
+    }
+  );
+
+  await AttendanceModel.insertMany(attendanceDocs, { ordered: false }).catch(() => undefined);
+  await ScanLogModel.insertMany(scanDocs);
+  console.log(
+    `[test-seed] created ${attendanceDocs.length} attendance rows and ${scanDocs.length} scan logs`
+  );
+}
 
 async function seedTest(): Promise<void> {
   await connectDB();
@@ -69,50 +329,20 @@ async function seedTest(): Promise<void> {
     );
   }
 
-  // ---- Clean up legacy student logins (student1/2/3) from the earlier seed ----
+  // ---- Clean up legacy student logins from the earlier seed ----
   const removed = await UserModel.deleteMany({ username: { $in: LEGACY_STUDENT_USERNAMES } });
   if (removed.deletedCount) {
-    console.log(`[test-seed] removed ${removed.deletedCount} legacy student login(s): ${LEGACY_STUDENT_USERNAMES.join(', ')}`);
+    console.log(`[test-seed] removed ${removed.deletedCount} legacy student login(s)`);
   }
 
-  // ---- Students (login username = student number / id_number) ----
-  for (const s of HARDCODED_STUDENTS) {
-    // Person profile (idempotent by rfid_uid)
-    let person = await PersonModel.findOne({ rfid_uid: s.rfid_uid });
-    if (person) {
-      console.log(`[test-seed] person '${s.full_name}' already exists — skipping profile`);
-    } else {
-      person = await PersonModel.create({
-        full_name: s.full_name,
-        type: 'student',
-        id_number: s.id_number,
-        department_section: s.department_section,
-        contact_email: s.contact_email,
-        rfid_uid: s.rfid_uid,
-        status: 'active',
-      });
-      console.log(`[test-seed] created person '${s.full_name}' (rfid: ${s.rfid_uid})`);
-    }
-
-    // Login account — username IS the student number (idempotent by username)
-    const existingUser = await UserModel.findOne({ username: s.id_number });
-    if (existingUser) {
-      console.log(`[test-seed] user '${s.id_number}' already exists — skipping login`);
-    } else {
-      const password_hash = await bcrypt.hash(s.password, 12);
-      await UserModel.create({
-        username: s.id_number,
-        password_hash,
-        role: ROLES.USER,
-        person_id: person._id,
-        must_change_password: false,
-        is_active: true,
-      });
-      console.log(
-        `[test-seed] created student login '${s.id_number}' (password: ${s.password}) -> '${s.full_name}'`
-      );
-    }
+  // ---- People (students + staff), login username = id_number ----
+  const persons: IPerson[] = [];
+  for (const p of HARDCODED_PEOPLE) {
+    persons.push(await ensurePerson(p));
   }
+
+  // ---- Demo activity so the dashboards aren't empty ----
+  await seedDemoActivity(persons);
 
   await disconnectDB();
   console.log('[test-seed] done');

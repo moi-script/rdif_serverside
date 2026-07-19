@@ -15,6 +15,8 @@ export const personRoutes = Router();
 
 personRoutes.use(authenticate, authorize(ROLES.ADMIN));
 personRoutes.get('/', personController.list);
+personRoutes.get('/sections', personController.sections);
+personRoutes.get('/:id/overview', personController.overview);
 personRoutes.get('/:id', personController.get);
 personRoutes.post('/', validate(createPersonSchema), personController.create);
 personRoutes.patch('/:id', validate(updatePersonSchema), personController.update);

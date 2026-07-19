@@ -13,6 +13,13 @@ export const personRepo = {
     return { items, total };
   },
 
+  async distinctSections(type?: string): Promise<string[]> {
+    const filter: FilterQuery<IPerson> = {};
+    if (type) filter.type = type;
+    const values = (await PersonModel.distinct('department_section', filter)) as (string | null)[];
+    return values.filter((v): v is string => Boolean(v)).sort();
+  },
+
   findById: (id: string) => PersonModel.findById(id).lean(),
   findByRfid: (rfid_uid: string) => PersonModel.findOne({ rfid_uid }),
   updateById: (id: string, data: Partial<IPerson>) =>
