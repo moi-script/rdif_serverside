@@ -18,7 +18,7 @@ const personSchema = new Schema<IPerson>(
   {
     full_name: { type: String, required: true },
     type: { type: String, enum: ['student', 'staff', 'employee'], required: true },
-    id_number: { type: String, required: true, index: true },
+    id_number: { type: String, required: true, unique: true, index: true },
     department_section: { type: String },
     contact_email: { type: String },
     photo_url: { type: String },

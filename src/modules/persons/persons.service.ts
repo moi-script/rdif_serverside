@@ -71,6 +71,10 @@ export const personService = {
   },
 
   async create(data: Partial<IPerson>) {
+    if (data.id_number) {
+      const dup = await personRepo.findByIdNumber(data.id_number);
+      if (dup) throw new ApiError('DUPLICATE_ID');
+    }
     if (data.rfid_uid) {
       const existing = await personRepo.findByRfid(data.rfid_uid);
       if (existing) throw new ApiError('DUPLICATE_RFID');
@@ -89,11 +93,13 @@ export const personService = {
         created++;
       } catch (err) {
         const reason =
-          err instanceof ApiError && err.code === 'DUPLICATE_RFID'
-            ? 'rfid_uid already registered'
-            : (err as { code?: number }).code === 11000
-              ? 'duplicate key (id_number or rfid_uid)'
-              : (err as Error).message;
+          err instanceof ApiError && err.code === 'DUPLICATE_ID'
+            ? 'id_number already registered'
+            : err instanceof ApiError && err.code === 'DUPLICATE_RFID'
+              ? 'rfid_uid already registered'
+              : (err as { code?: number }).code === 11000
+                ? 'duplicate key (id_number or rfid_uid)'
+                : (err as Error).message;
         skipped.push({ row: i + 1, reason });
       }
     }

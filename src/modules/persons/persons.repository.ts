@@ -25,6 +25,7 @@ export const personRepo = {
 
   findById: (id: string) => PersonModel.findById(id).lean(),
   findByRfid: (rfid_uid: string) => PersonModel.findOne({ rfid_uid }),
+  findByIdNumber: (id_number: string) => PersonModel.findOne({ id_number }),
   updateById: (id: string, data: Partial<IPerson>) =>
     PersonModel.findByIdAndUpdate(id, data, { new: true }).lean(),
 };
