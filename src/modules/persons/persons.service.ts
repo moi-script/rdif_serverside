@@ -28,6 +28,38 @@ export const personService = {
     return { items, meta: buildMeta(total, p.page, p.limit) };
   },
 
+  async exportCsv(query: ListQuery): Promise<string> {
+    const filter: FilterQuery<IPerson> = {};
+    if (query.type) filter.type = query.type;
+    if (query.status) filter.status = query.status;
+    if (query.section) filter.department_section = query.section;
+    if (query.search) {
+      const rx = { $regex: query.search, $options: 'i' };
+      filter.$or = [{ full_name: rx }, { id_number: rx }];
+    }
+    const rows = await personRepo.findAll(filter);
+    const header =
+      'full_name,type,id_number,department_section,contact_email,photo_url,rfid_uid';
+    const esc = (v: unknown) => {
+      const s = v == null ? '' : String(v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const lines = rows.map((r) =>
+      [
+        r.full_name,
+        r.type,
+        r.id_number,
+        r.department_section,
+        r.contact_email,
+        r.photo_url,
+        r.rfid_uid,
+      ]
+        .map(esc)
+        .join(',')
+    );
+    return [header, ...lines].join('\n');
+  },
+
   async sections(type?: string) {
     return personRepo.distinctSections(type);
   },

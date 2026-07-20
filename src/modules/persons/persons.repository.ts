@@ -13,6 +13,9 @@ export const personRepo = {
     return { items, total };
   },
 
+  findAll: (filter: FilterQuery<IPerson>) =>
+    PersonModel.find(filter).sort({ createdAt: -1 }).lean(),
+
   async distinctSections(type?: string): Promise<string[]> {
     const filter: FilterQuery<IPerson> = {};
     if (type) filter.type = type;

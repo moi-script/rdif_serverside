@@ -11,6 +11,13 @@ export const personController = {
     const { items, meta } = await personService.list(req.query);
     sendSuccess(res, items, 200, meta);
   }),
+  export: asyncHandler(async (req: Request, res: Response) => {
+    const csv = await personService.exportCsv(req.query);
+    const date = new Date().toISOString().slice(0, 10);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="persons-${date}.csv"`);
+    res.status(200).send(csv);
+  }),
   // Full profile (profile + attendance + vehicle + recent scans) — same shape a
   // student sees on their own dashboard, but for any person the admin picks.
   overview: asyncHandler(async (req: Request, res: Response) => {
