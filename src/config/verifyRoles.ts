@@ -253,6 +253,109 @@ async function main(): Promise<void> {
     true
   );
 
+  console.log('\n== single-user activate / deactivate ==');
+
+  // Find Juan's user id and person id via the joined list.
+  const forStatus = await request(superadmin, 'GET', '/users?limit=100');
+  const statusRows = (forStatus.json.data ?? []) as {
+    id: string;
+    username: string;
+    person: { id: string; status: string } | null;
+  }[];
+  const juanRow = statusRows.find((u) => u.username === '2025-0001');
+  if (!juanRow?.person) throw new Error('seed missing: student 2025-0001 with a person');
+  const juanUserId = juanRow.id;
+  const selfRow = statusRows.find((u) => u.username === 'testadmin');
+  if (!selfRow) throw new Error('seed missing: testadmin');
+
+  // Only superadmin may flip status.
+  await check(
+    'registrar cannot deactivate',
+    registrar,
+    'PATCH',
+    `/users/${juanUserId}/status`,
+    FORBIDDEN,
+    { active: false }
+  );
+  await check(
+    'student cannot deactivate',
+    student,
+    'PATCH',
+    `/users/${juanUserId}/status`,
+    FORBIDDEN,
+    { active: false }
+  );
+
+  // Superadmin cannot deactivate themselves.
+  await check(
+    'superadmin cannot deactivate self',
+    superadmin,
+    'PATCH',
+    `/users/${selfRow.id}/status`,
+    FORBIDDEN,
+    { active: false }
+  );
+
+  // Deactivating flips both the login and the gate status.
+  await check(
+    'superadmin deactivates student',
+    superadmin,
+    'PATCH',
+    `/users/${juanUserId}/status`,
+    OK,
+    { active: false }
+  );
+
+  const afterOff = await request(superadmin, 'GET', '/users?limit=100');
+  const offRow = ((afterOff.json.data ?? []) as typeof statusRows).find(
+    (u) => u.username === '2025-0001'
+  );
+  expectEqual('login disabled', (offRow as unknown as { is_active: boolean })?.is_active, false);
+  expectEqual('person marked inactive', offRow?.person?.status, 'inactive');
+
+  // A deactivated account cannot log in.
+  const deniedLogin = await fetch(`${BASE}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: '2025-0001', password: 'Student@123' }),
+  });
+  expectEqual('deactivated user cannot log in', deniedLogin.status, 401);
+
+  // The gate denies the card with the existing reason string.
+  const gatesRes = await request(superadmin, 'GET', '/gates');
+  const gateList = (gatesRes.json.data ?? []) as { _id?: string; id?: string; name: string }[];
+  const mainGate = gateList.find((g) => g.name === 'Main Entrance');
+  const gateId = (mainGate?._id ?? mainGate?.id) as string;
+  const tap = await request(superadmin, 'POST', '/scan/tap', {
+    rfid_uid: 'RFID-STU-0001',
+    gate_id: gateId,
+    direction: 'entry',
+  });
+  const tapData = (tap.json.data ?? {}) as { access_result?: string; reason?: string };
+  expectEqual('gate denies inactive card', tapData.access_result, 'denied');
+  expectEqual('denial reason is inactive_id', tapData.reason, 'inactive_id');
+
+  // Reactivating restores both and clears the audit stamp.
+  await check(
+    'superadmin reactivates student',
+    superadmin,
+    'PATCH',
+    `/users/${juanUserId}/status`,
+    OK,
+    { active: true }
+  );
+  const afterOn = await request(superadmin, 'GET', '/users?limit=100');
+  const onRow = ((afterOn.json.data ?? []) as typeof statusRows).find(
+    (u) => u.username === '2025-0001'
+  );
+  expectEqual('login re-enabled', (onRow as unknown as { is_active: boolean })?.is_active, true);
+  expectEqual('person re-activated', onRow?.person?.status, 'active');
+  expectEqual(
+    'audit stamp cleared',
+    (onRow as unknown as { deactivated_at: string | null })?.deactivated_at,
+    null
+  );
+
   summary();
 }
 

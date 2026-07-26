@@ -11,3 +11,7 @@ export const createUserSchema = z.object({
 export const resetPasswordSchema = z.object({
   password: z.string().min(8),
 });
+
+export const userStatusSchema = z.object({
+  active: z.boolean(),
+});

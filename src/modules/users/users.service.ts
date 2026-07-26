@@ -4,6 +4,7 @@ import { IUser } from './users.model';
 import { ApiError } from '../../utils/ApiError';
 import { getPagination, buildMeta } from '../../utils/pagination';
 import { ROLES, Role, BULK_PROTECTED } from '../../constants/roles';
+import { personRepo } from '../persons/persons.repository';
 
 const BCRYPT_ROUNDS = 12;
 
@@ -68,5 +69,38 @@ export const userService = {
     const updated = await userRepo.updateById(id, { is_active: false, refreshTokenHash: null });
     if (!updated) throw new ApiError('NOT_FOUND', 'User not found');
     return { id, is_active: false };
+  },
+
+  /**
+   * One toggle, two effects: the login and the RFID card.
+   *
+   * Deactivating clears refreshTokenHash so an existing session cannot be
+   * refreshed back into life, and stamps who did it. Reactivating clears the
+   * stamp. Task 8's bulk path applies these same rules.
+   */
+  async setStatus(id: string, active: boolean, actorUserId: string) {
+    if (id === actorUserId) {
+      throw new ApiError('FORBIDDEN', 'You cannot change your own account status');
+    }
+
+    const target = await userRepo.findById(id);
+    if (!target) throw new ApiError('NOT_FOUND', 'User not found');
+
+    await userRepo.updateById(id, {
+      is_active: active,
+      refreshTokenHash: active ? undefined : null,
+      deactivated_at: active ? null : new Date(),
+      deactivated_by: active
+        ? null
+        : (actorUserId as unknown as IUser['deactivated_by']),
+    });
+
+    let person_status: 'active' | 'inactive' | null = null;
+    if (target.person_id) {
+      person_status = active ? 'active' : 'inactive';
+      await personRepo.updateById(String(target.person_id), { status: person_status });
+    }
+
+    return { id, is_active: active, person_status };
   },
 };

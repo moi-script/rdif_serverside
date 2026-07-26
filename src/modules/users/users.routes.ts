@@ -4,7 +4,7 @@ import { authorize } from '../../middlewares/authorize';
 import { validate } from '../../middlewares/validate';
 import { ROLES } from '../../constants/roles';
 import { userController } from './users.controller';
-import { createUserSchema, resetPasswordSchema } from './users.schema';
+import { createUserSchema, resetPasswordSchema, userStatusSchema } from './users.schema';
 
 export const userRoutes = Router();
 
@@ -27,3 +27,9 @@ userRoutes.patch(
   userController.resetPassword
 );
 userRoutes.delete('/:id', authorize(ROLES.SUPERADMIN), userController.remove);
+userRoutes.patch(
+  '/:id/status',
+  authorize(ROLES.SUPERADMIN),
+  validate(userStatusSchema),
+  userController.setStatus
+);

@@ -17,4 +17,10 @@ export const userController = {
   remove: asyncHandler(async (req: Request, res: Response) => {
     sendSuccess(res, await userService.softDelete(req.params.id));
   }),
+  setStatus: asyncHandler(async (req: Request, res: Response) => {
+    sendSuccess(
+      res,
+      await userService.setStatus(req.params.id, req.body.active, req.user!.userId)
+    );
+  }),
 };
