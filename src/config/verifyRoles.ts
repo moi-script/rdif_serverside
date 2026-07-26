@@ -356,6 +356,53 @@ async function main(): Promise<void> {
     null
   );
 
+  // A superadmin may deactivate ANOTHER superadmin individually — only the
+  // bulk path (Task 8) protects privileged roles. Use the prod-seeded
+  // 'admin' account as the target (not 'testadmin', which is the account we
+  // are authenticated as, and self-action is FORBIDDEN).
+  const forAdminTarget = await request(superadmin, 'GET', '/users?limit=100');
+  const adminRows = (forAdminTarget.json.data ?? []) as { id: string; username: string }[];
+  const otherSuperadminRow = adminRows.find((u) => u.username === 'admin');
+  if (!otherSuperadminRow) throw new Error("seed missing: prod-seeded superadmin 'admin'");
+  const otherSuperadminId = otherSuperadminRow.id;
+
+  await check(
+    'superadmin deactivates another superadmin',
+    superadmin,
+    'PATCH',
+    `/users/${otherSuperadminId}/status`,
+    OK,
+    { active: false }
+  );
+  const afterOtherOff = await request(superadmin, 'GET', '/users?limit=100');
+  const otherOffRow = ((afterOtherOff.json.data ?? []) as typeof statusRows).find(
+    (u) => u.username === 'admin'
+  );
+  expectEqual(
+    'other superadmin login disabled',
+    (otherOffRow as unknown as { is_active: boolean })?.is_active,
+    false
+  );
+
+  // Restore state so the harness stays re-runnable.
+  await check(
+    'superadmin reactivates the other superadmin',
+    superadmin,
+    'PATCH',
+    `/users/${otherSuperadminId}/status`,
+    OK,
+    { active: true }
+  );
+  const afterOtherOn = await request(superadmin, 'GET', '/users?limit=100');
+  const otherOnRow = ((afterOtherOn.json.data ?? []) as typeof statusRows).find(
+    (u) => u.username === 'admin'
+  );
+  expectEqual(
+    'other superadmin login re-enabled',
+    (otherOnRow as unknown as { is_active: boolean })?.is_active,
+    true
+  );
+
   summary();
 }
 

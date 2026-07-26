@@ -1,4 +1,5 @@
 import bcrypt from 'bcrypt';
+import { Types } from 'mongoose';
 import { userRepo } from './users.repository';
 import { IUser } from './users.model';
 import { ApiError } from '../../utils/ApiError';
@@ -77,6 +78,18 @@ export const userService = {
    * Deactivating clears refreshTokenHash so an existing session cannot be
    * refreshed back into life, and stamps who did it. Reactivating clears the
    * stamp. Task 8's bulk path applies these same rules.
+   *
+   * Write order is deliberate, not incidental, and it is conditional on
+   * `active`: the gate is the first thing closed and the last thing opened.
+   * There is no transaction here (a standalone dev Mongo has no replica set),
+   * so a partial failure between the two writes is possible — the order
+   * decides which side that failure leaves safe.
+   *   - Deactivating: write Person first, then User. If the User write never
+   *     happens, the card is already refused at the gate even though the
+   *     login still works — inconvenient, but safe.
+   *   - Reactivating: write User first, then Person. If the Person write
+   *     never happens, the login works but the gate stays shut — safe in the
+   *     same direction.
    */
   async setStatus(id: string, active: boolean, actorUserId: string) {
     if (id === actorUserId) {
@@ -86,19 +99,32 @@ export const userService = {
     const target = await userRepo.findById(id);
     if (!target) throw new ApiError('NOT_FOUND', 'User not found');
 
-    await userRepo.updateById(id, {
+    const userUpdate = {
       is_active: active,
       refreshTokenHash: active ? undefined : null,
       deactivated_at: active ? null : new Date(),
-      deactivated_by: active
-        ? null
-        : (actorUserId as unknown as IUser['deactivated_by']),
-    });
+      deactivated_by: active ? null : new Types.ObjectId(actorUserId),
+    };
 
     let person_status: 'active' | 'inactive' | null = null;
     if (target.person_id) {
       person_status = active ? 'active' : 'inactive';
-      await personRepo.updateById(String(target.person_id), { status: person_status });
+    }
+
+    if (active) {
+      // Reactivating: login first, then gate — either order is safe here,
+      // but this keeps a symmetric "user is the login side" mental model.
+      await userRepo.updateById(id, userUpdate);
+      if (target.person_id) {
+        await personRepo.updateById(String(target.person_id), { status: person_status! });
+      }
+    } else {
+      // Deactivating: gate first, then login — if the login write is lost,
+      // the card is already refused, which is the safe side to fail on.
+      if (target.person_id) {
+        await personRepo.updateById(String(target.person_id), { status: person_status! });
+      }
+      await userRepo.updateById(id, userUpdate);
     }
 
     return { id, is_active: active, person_status };
