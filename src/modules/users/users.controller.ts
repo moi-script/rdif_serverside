@@ -24,7 +24,10 @@ export const userController = {
     );
   }),
   bulkPreview: asyncHandler(async (req: Request, res: Response) => {
-    const q = req.query as Record<string, string | undefined>;
+    // `validate(bulkFilterSchema, 'query')` has already parsed req.query into
+    // exactly the shape bulkStatusSchema's `filter` admits, so preview and
+    // mutation resolve the same filter through the same schema.
+    const q = req.query as { type?: string; department_section?: string; search?: string };
     sendSuccess(
       res,
       await userService.bulkPreview(

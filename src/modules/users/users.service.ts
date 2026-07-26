@@ -188,10 +188,20 @@ export const userService = {
       },
     };
 
+    // Narrow the User write to accounts that actually change state. Without
+    // this, a `filter: {}` lockout rewrites deactivated_at/deactivated_by on
+    // accounts someone else already deactivated, destroying that audit
+    // trail, and modifiedCount stops meaning anything. This narrowing is
+    // applied only to the write, never to target resolution: `matched`
+    // stays `targets.length` (how many the filter selected, before this
+    // idempotency check) so preview and mutation still agree; `modified` is
+    // how many rows actually flipped.
+    const userFilter = { _id: { $in: targets }, is_active: !active };
+
     let result: { modifiedCount: number };
     if (active) {
       // Reactivating: login first, then gate.
-      result = await UserModel.updateMany({ _id: { $in: targets } }, userUpdate);
+      result = await UserModel.updateMany(userFilter, userUpdate);
       if (personIds.length) {
         await PersonModel.updateMany({ _id: { $in: personIds } }, { $set: { status: 'active' } });
       }
@@ -203,7 +213,7 @@ export const userService = {
           { $set: { status: 'inactive' } }
         );
       }
-      result = await UserModel.updateMany({ _id: { $in: targets } }, userUpdate);
+      result = await UserModel.updateMany(userFilter, userUpdate);
     }
 
     return { matched: targets.length, modified: result.modifiedCount, excluded };

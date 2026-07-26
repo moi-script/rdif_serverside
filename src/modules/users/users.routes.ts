@@ -9,6 +9,7 @@ import {
   resetPasswordSchema,
   userStatusSchema,
   bulkStatusSchema,
+  bulkFilterSchema,
 } from './users.schema';
 
 export const userRoutes = Router();
@@ -38,6 +39,7 @@ userRoutes.delete('/:id', authorize(ROLES.SUPERADMIN), userController.remove);
 userRoutes.get(
   '/bulk-status/preview',
   authorize(ROLES.SUPERADMIN),
+  validate(bulkFilterSchema, 'query'),
   userController.bulkPreview
 );
 userRoutes.post(

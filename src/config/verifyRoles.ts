@@ -440,7 +440,16 @@ async function main(): Promise<void> {
     modified: number;
     excluded: number;
   };
-  expectEqual('bulk matched equals preview', bulkData.matched, previewData.matched);
+  // A plain expectEqual(bulkData.matched, previewData.matched) would pass
+  // when the endpoint 404s and both sides are undefined — that is exactly
+  // what happened in the Step 2 pre-implementation run. Require a real
+  // number on both sides so a missing/broken endpoint cannot masquerade as
+  // agreement.
+  expectEqual(
+    'bulk matched equals preview',
+    typeof bulkData.matched === 'number' && bulkData.matched === previewData.matched,
+    true
+  );
   expectEqual('bulk modified all three', bulkData.modified, 3);
 
   // Every student is now off, in both places.
@@ -456,7 +465,7 @@ async function main(): Promise<void> {
   );
   expectEqual(
     'all student cards inactive',
-    bulkRows.every((u) => u.person?.status === 'inactive'),
+    bulkRows.length === 3 && bulkRows.every((u) => u.person?.status === 'inactive'),
     true
   );
 
@@ -490,9 +499,37 @@ async function main(): Promise<void> {
     filter: {},
   });
   const restored = await request(superadmin, 'GET', '/users?limit=100');
+
+  // Guard against silent truncation: if the account count ever exceeds the
+  // page limit, a check over `restored.json.data` alone would only see part
+  // of the list and could pass while accounts outside the page stay
+  // deactivated. Fail loudly instead of truncating quietly.
+  const restoredMeta = (restored.json.meta ?? {}) as { pagination?: { total: number } };
   expectEqual(
-    'everyone restored',
-    ((restored.json.data ?? []) as { is_active: boolean }[]).every((u) => u.is_active),
+    'restore check covers every account (no silent truncation)',
+    typeof restoredMeta.pagination?.total === 'number' && restoredMeta.pagination.total <= 100,
+    true
+  );
+
+  const restoredRows = (restored.json.data ?? []) as {
+    is_active: boolean;
+    person: { status: string } | null;
+  }[];
+  expectEqual(
+    'everyone restored: logins re-enabled',
+    restoredRows.length > 0 && restoredRows.every((u) => u.is_active),
+    true
+  );
+
+  // The reactivate path's Person write (the gate side) must also be
+  // verified — asserting only is_active would miss a regression that leaves
+  // linked cards inactive even after the login is re-enabled, and that
+  // corruption would only surface later, at Task 14.
+  const restoredWithPerson = restoredRows.filter((u) => u.person !== null);
+  expectEqual(
+    'everyone restored: linked cards re-activated',
+    restoredWithPerson.length > 0 &&
+      restoredWithPerson.every((u) => u.person?.status === 'active'),
     true
   );
 
