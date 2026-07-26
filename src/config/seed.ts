@@ -18,18 +18,18 @@ async function seed(): Promise<void> {
   // Admin (idempotent)
   const existingAdmin = await UserModel.findOne({ username: env.ADMIN_USERNAME });
   if (existingAdmin) {
-    console.log(`[seed] admin '${env.ADMIN_USERNAME}' already exists — skipping`);
+    console.log(`[seed] superadmin '${env.ADMIN_USERNAME}' already exists — skipping`);
   } else {
     const password_hash = await bcrypt.hash(env.ADMIN_PASSWORD, 12);
     await UserModel.create({
       username: env.ADMIN_USERNAME,
       password_hash,
-      role: ROLES.ADMIN,
+      role: ROLES.SUPERADMIN,
       person_id: null,
       must_change_password: true,
       is_active: true,
     });
-    console.log(`[seed] created admin '${env.ADMIN_USERNAME}'`);
+    console.log(`[seed] created superadmin '${env.ADMIN_USERNAME}'`);
   }
 
   // Gates (idempotent by name)

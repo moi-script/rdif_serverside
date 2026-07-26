@@ -20,6 +20,11 @@ const HARDCODED_ADMIN = {
   password: 'Admin@123',
 };
 
+const HARDCODED_REGISTRAR = {
+  username: 'testregistrar',
+  password: 'Registrar@123',
+};
+
 // Login username = id_number, so the client "Student number" field matches the users table.
 const HARDCODED_PEOPLE: {
   password: string;
@@ -130,7 +135,7 @@ async function ensurePerson(
     await UserModel.create({
       username: p.id_number,
       password_hash,
-      role: ROLES.USER,
+      role: p.type === 'student' ? ROLES.STUDENT : ROLES.STAFF,
       person_id: person._id,
       must_change_password: false,
       is_active: true,
@@ -319,13 +324,32 @@ async function seedTest(): Promise<void> {
     await UserModel.create({
       username: HARDCODED_ADMIN.username,
       password_hash,
-      role: ROLES.ADMIN,
+      role: ROLES.SUPERADMIN,
       person_id: null,
       must_change_password: false,
       is_active: true,
     });
     console.log(
       `[test-seed] created admin '${HARDCODED_ADMIN.username}' (password: ${HARDCODED_ADMIN.password})`
+    );
+  }
+
+  // ---- Registrar ----
+  const existingRegistrar = await UserModel.findOne({ username: HARDCODED_REGISTRAR.username });
+  if (existingRegistrar) {
+    console.log(`[test-seed] registrar '${HARDCODED_REGISTRAR.username}' already exists — skipping`);
+  } else {
+    const password_hash = await bcrypt.hash(HARDCODED_REGISTRAR.password, 12);
+    await UserModel.create({
+      username: HARDCODED_REGISTRAR.username,
+      password_hash,
+      role: ROLES.REGISTRAR,
+      person_id: null,
+      must_change_password: false,
+      is_active: true,
+    });
+    console.log(
+      `[test-seed] created registrar '${HARDCODED_REGISTRAR.username}' (password: ${HARDCODED_REGISTRAR.password})`
     );
   }
 
