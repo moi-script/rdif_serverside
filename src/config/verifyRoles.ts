@@ -135,8 +135,17 @@ async function main(): Promise<void> {
   ] as const) {
     await check(`${name} GET /dashboard`, token, 'GET', '/dashboard', OK);
     await check(`${name} GET /gates`, token, 'GET', '/gates', OK);
+  }
+
+  console.log('\n== attendance: superadmin, staff, and student may read; registrar may not ==');
+  for (const [name, token] of [
+    ['superadmin', superadmin],
+    ['staff', staff],
+    ['student', student],
+  ] as const) {
     await check(`${name} GET /attendance`, token, 'GET', '/attendance', OK);
   }
+  await check('registrar GET /attendance denied', registrar, 'GET', '/attendance', FORBIDDEN);
 
   console.log('\n== users list ==');
   await check('superadmin GET /users', superadmin, 'GET', '/users', OK);
