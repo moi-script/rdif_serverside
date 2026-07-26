@@ -11,18 +11,21 @@ const BASE = process.env.VERIFY_BASE_URL ?? 'http://localhost:3000/api';
 const failures: string[] = [];
 let checks = 0;
 
-async function login(username: string, password: string): Promise<string> {
+async function login(
+  username: string,
+  password: string
+): Promise<{ token: string; role: string | undefined }> {
   const res = await fetch(`${BASE}/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username, password }),
   });
-  const body = (await res.json()) as { data?: { accessToken?: string } };
+  const body = (await res.json()) as { data?: { accessToken?: string; user?: { role?: string } } };
   const token = body.data?.accessToken;
   if (!token) {
     throw new Error(`login failed for '${username}' (HTTP ${res.status})`);
   }
-  return token;
+  return { token, role: body.data?.user?.role };
 }
 
 async function request(
@@ -99,10 +102,21 @@ const OK = 200;
 const FORBIDDEN = 403;
 
 async function main(): Promise<void> {
-  const superadmin = await login('testadmin', 'Admin@123');
-  const registrar = await login('testregistrar', 'Registrar@123');
-  const student = await login('2025-0001', 'Student@123');
-  const staff = await login('EMP-1001', 'Staff@123');
+  const superadminLogin = await login('testadmin', 'Admin@123');
+  const registrarLogin = await login('testregistrar', 'Registrar@123');
+  const studentLogin = await login('2025-0001', 'Student@123');
+  const staffLogin = await login('EMP-1001', 'Staff@123');
+
+  const superadmin = superadminLogin.token;
+  const registrar = registrarLogin.token;
+  const student = studentLogin.token;
+  const staff = staffLogin.token;
+
+  console.log('\n== seeded accounts carry the expected roles ==');
+  expectEqual('testadmin is superadmin', superadminLogin.role, 'superadmin');
+  expectEqual('testregistrar is registrar', registrarLogin.role, 'registrar');
+  expectEqual('2025-0001 is student', studentLogin.role, 'student');
+  expectEqual('EMP-1001 is staff', staffLogin.role, 'staff');
 
   console.log('\n== persons: superadmin and registrar may read ==');
   for (const [name, token] of [
