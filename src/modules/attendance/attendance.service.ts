@@ -19,7 +19,7 @@ export const attendanceService = {
     const p = getPagination(query as Record<string, unknown>);
     const filter: FilterQuery<IAttendance> = {};
 
-    if (actor.role === ROLES.ADMIN) {
+    if (actor.role === ROLES.SUPERADMIN) {
       if (query.person_id) filter.person_id = query.person_id;
     } else {
       if (!actor.personId) throw new ApiError('FORBIDDEN', 'Account not linked to a person');

@@ -7,5 +7,5 @@ import { attendanceController } from './attendance.controller';
 export const attendanceRoutes = Router();
 
 attendanceRoutes.use(authenticate);
-attendanceRoutes.get('/', attendanceController.list);
-attendanceRoutes.get('/summary/:person_id', authorize(ROLES.ADMIN), attendanceController.summary);
+attendanceRoutes.get('/', authorize(ROLES.SUPERADMIN, ROLES.STAFF, ROLES.STUDENT), attendanceController.list);
+attendanceRoutes.get('/summary/:person_id', authorize(ROLES.SUPERADMIN), attendanceController.summary);

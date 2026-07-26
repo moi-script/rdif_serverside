@@ -20,6 +20,11 @@ const HARDCODED_ADMIN = {
   password: 'Admin@123',
 };
 
+const HARDCODED_REGISTRAR = {
+  username: 'testregistrar',
+  password: 'Registrar@123',
+};
+
 // Login username = id_number, so the client "Student number" field matches the users table.
 const HARDCODED_PEOPLE: {
   password: string;
@@ -37,7 +42,7 @@ const HARDCODED_PEOPLE: {
     id_number: '2025-0001',
     department_section: 'BSIT - 4A',
     contact_email: 'juan.delacruz@student.ncst.edu.ph',
-    rfid_uid: 'RFID-STU-0001',
+    rfid_uid: 'A1B2C3D4',
   },
   {
     password: 'Student@123',
@@ -46,7 +51,7 @@ const HARDCODED_PEOPLE: {
     id_number: '2025-0002',
     department_section: 'BSCS - 3B',
     contact_email: 'maria.santos@student.ncst.edu.ph',
-    rfid_uid: 'RFID-STU-0002',
+    rfid_uid: 'B2C3D4E5',
   },
   {
     password: 'Student@123',
@@ -55,7 +60,7 @@ const HARDCODED_PEOPLE: {
     id_number: '2025-0003',
     department_section: 'BSIT - 2C',
     contact_email: 'pedro.reyes@student.ncst.edu.ph',
-    rfid_uid: 'RFID-STU-0003',
+    rfid_uid: 'C3D4E5F6',
   },
   {
     password: 'Staff@123',
@@ -64,7 +69,7 @@ const HARDCODED_PEOPLE: {
     id_number: 'EMP-1001',
     department_section: 'Registrar Office',
     contact_email: 'ana.villanueva@ncst.edu.ph',
-    rfid_uid: 'RFID-STF-1001',
+    rfid_uid: 'D4E5F6A7',
   },
 ];
 
@@ -130,7 +135,7 @@ async function ensurePerson(
     await UserModel.create({
       username: p.id_number,
       password_hash,
-      role: ROLES.USER,
+      role: p.type === 'student' ? ROLES.STUDENT : ROLES.STAFF,
       person_id: person._id,
       must_change_password: false,
       is_active: true,
@@ -154,8 +159,8 @@ async function seedDemoActivity(persons: IPerson[]): Promise<void> {
 
   // Vehicles for a couple of people (idempotent by owner)
   const vehicleOwners: { id_number: string; plate: string; rfid: string; type: string; model: string }[] = [
-    { id_number: '2025-0001', plate: 'NCST-1234', rfid: 'RFID-VEH-0001', type: 'Motorcycle', model: 'Honda Click 125i' },
-    { id_number: 'EMP-1001', plate: 'NCST-5678', rfid: 'RFID-VEH-0002', type: 'Car', model: 'Toyota Vios' },
+    { id_number: '2025-0001', plate: 'NCST-1234', rfid: 'E5F6A7B8', type: 'Motorcycle', model: 'Honda Click 125i' },
+    { id_number: 'EMP-1001', plate: 'NCST-5678', rfid: 'F6A7B8C9', type: 'Car', model: 'Toyota Vios' },
   ];
   const vehicleDocs: { rfid: string; ownerId: Types.ObjectId }[] = [];
   for (const v of vehicleOwners) {
@@ -319,13 +324,32 @@ async function seedTest(): Promise<void> {
     await UserModel.create({
       username: HARDCODED_ADMIN.username,
       password_hash,
-      role: ROLES.ADMIN,
+      role: ROLES.SUPERADMIN,
       person_id: null,
       must_change_password: false,
       is_active: true,
     });
     console.log(
       `[test-seed] created admin '${HARDCODED_ADMIN.username}' (password: ${HARDCODED_ADMIN.password})`
+    );
+  }
+
+  // ---- Registrar ----
+  const existingRegistrar = await UserModel.findOne({ username: HARDCODED_REGISTRAR.username });
+  if (existingRegistrar) {
+    console.log(`[test-seed] registrar '${HARDCODED_REGISTRAR.username}' already exists — skipping`);
+  } else {
+    const password_hash = await bcrypt.hash(HARDCODED_REGISTRAR.password, 12);
+    await UserModel.create({
+      username: HARDCODED_REGISTRAR.username,
+      password_hash,
+      role: ROLES.REGISTRAR,
+      person_id: null,
+      must_change_password: false,
+      is_active: true,
+    });
+    console.log(
+      `[test-seed] created registrar '${HARDCODED_REGISTRAR.username}' (password: ${HARDCODED_REGISTRAR.password})`
     );
   }
 

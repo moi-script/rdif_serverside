@@ -8,6 +8,7 @@
     "start": "node dist/server.js",
     "seed": "ts-node src/config/seed.ts",
     "seed:test": "ts-node src/config/testSeed.ts",
+    "verify:roles": "ts-node src/config/verifyRoles.ts",
     "lint": "eslint src --ext .ts"
   },
   "dependencies": {

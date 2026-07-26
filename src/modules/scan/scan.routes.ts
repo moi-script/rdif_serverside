@@ -11,4 +11,4 @@ export const scanRoutes = Router();
 
 scanRoutes.use(authenticate);
 scanRoutes.post('/tap', scanLimiter, validate(tapSchema), scanController.tap);
-scanRoutes.get('/logs', authorize(ROLES.ADMIN), scanController.logs);
+scanRoutes.get('/logs', authorize(ROLES.SUPERADMIN), scanController.logs);

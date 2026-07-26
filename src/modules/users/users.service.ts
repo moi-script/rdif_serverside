@@ -1,33 +1,48 @@
 import bcrypt from 'bcrypt';
-import { userRepo } from './users.repository';
-import { IUser } from './users.model';
+import { Types } from 'mongoose';
+import { userRepo, UserListQuery } from './users.repository';
+import { IUser, UserModel } from './users.model';
 import { ApiError } from '../../utils/ApiError';
 import { getPagination, buildMeta } from '../../utils/pagination';
-import { ROLES } from '../../constants/roles';
+import { ROLES, Role, BULK_PROTECTED } from '../../constants/roles';
+import { personRepo } from '../persons/persons.repository';
+import { PersonModel } from '../persons/persons.model';
 
 const BCRYPT_ROUNDS = 12;
 
 interface CreateUserInput {
   username: string;
   password: string;
+  role: Role;
   person_id?: string | null;
 }
 
 export const userService = {
   async list(query: Record<string, string | undefined>) {
     const p = getPagination(query);
-    const { items, total } = await userRepo.findPaginated({}, p);
+    const filter = await userRepo.buildFilter({
+      type: query.type,
+      department_section: query.department_section,
+      search: query.search,
+    });
+    const { items, total } = await userRepo.findPaginatedWithPerson(filter, p);
     return { items, meta: buildMeta(total, p.page, p.limit) };
   },
 
-  async create(input: CreateUserInput) {
+  async create(input: CreateUserInput, actorRole: Role) {
+    // A registrar registers people; only a superadmin mints privileged accounts.
+    if (actorRole !== ROLES.SUPERADMIN && BULK_PROTECTED.includes(input.role)) {
+      throw new ApiError('FORBIDDEN', 'Only a superadmin can create privileged accounts');
+    }
+
     const existing = await userRepo.findByUsername(input.username);
     if (existing) throw new ApiError('DUPLICATE_USERNAME');
+
     const password_hash = await bcrypt.hash(input.password, BCRYPT_ROUNDS);
     const created = await userRepo.create({
       username: input.username,
       password_hash,
-      role: ROLES.USER,
+      role: input.role,
       person_id: (input.person_id as unknown as IUser['person_id']) ?? null,
       must_change_password: true,
       is_active: true,
@@ -52,9 +67,179 @@ export const userService = {
     return { id, updated: true };
   },
 
-  async softDelete(id: string) {
-    const updated = await userRepo.updateById(id, { is_active: false, refreshTokenHash: null });
-    if (!updated) throw new ApiError('NOT_FOUND', 'User not found');
-    return { id, is_active: false };
+  /**
+   * Deletion is a one-way deactivation that also hides the account from every list.
+   *
+   * Person first, then user — same fail-safe rule as setStatus. If the second write is
+   * lost, the card is already refused at the gate and only the login survives.
+   */
+  async softDelete(id: string, actorUserId: string) {
+    if (id === actorUserId) {
+      throw new ApiError('FORBIDDEN', 'You cannot delete your own account');
+    }
+
+    const target = await userRepo.findById(id);
+    if (!target || target.deleted_at) throw new ApiError('NOT_FOUND', 'User not found');
+
+    if (target.person_id) {
+      await personRepo.updateById(String(target.person_id), { status: 'inactive' });
+    }
+
+    const now = new Date();
+    await userRepo.updateById(id, {
+      is_active: false,
+      deleted_at: now,
+      deactivated_at: now,
+      deactivated_by: new Types.ObjectId(actorUserId),
+      refreshTokenHash: null,
+    });
+
+    return { id, deleted: true };
+  },
+
+  /**
+   * One toggle, two effects: the login and the RFID card.
+   *
+   * Deactivating clears refreshTokenHash so an existing session cannot be
+   * refreshed back into life, and stamps who did it. Reactivating clears the
+   * stamp. Task 8's bulk path applies these same rules.
+   *
+   * Write order is deliberate, not incidental, and it is conditional on
+   * `active`: the gate is the first thing closed and the last thing opened.
+   * There is no transaction here (a standalone dev Mongo has no replica set),
+   * so a partial failure between the two writes is possible — the order
+   * decides which side that failure leaves safe.
+   *   - Deactivating: write Person first, then User. If the User write never
+   *     happens, the card is already refused at the gate even though the
+   *     login still works — inconvenient, but safe.
+   *   - Reactivating: write User first, then Person. If the Person write
+   *     never happens, the login works but the gate stays shut — safe in the
+   *     same direction.
+   */
+  async setStatus(id: string, active: boolean, actorUserId: string) {
+    if (id === actorUserId) {
+      throw new ApiError('FORBIDDEN', 'You cannot change your own account status');
+    }
+
+    const target = await userRepo.findById(id);
+    if (!target || target.deleted_at) throw new ApiError('NOT_FOUND', 'User not found');
+
+    const userUpdate = {
+      is_active: active,
+      refreshTokenHash: active ? undefined : null,
+      deactivated_at: active ? null : new Date(),
+      deactivated_by: active ? null : new Types.ObjectId(actorUserId),
+    };
+
+    let person_status: 'active' | 'inactive' | null = null;
+    if (target.person_id) {
+      person_status = active ? 'active' : 'inactive';
+    }
+
+    if (active) {
+      // Reactivating: login first, then gate — either order is safe here,
+      // but this keeps a symmetric "user is the login side" mental model.
+      await userRepo.updateById(id, userUpdate);
+      if (target.person_id) {
+        await personRepo.updateById(String(target.person_id), { status: person_status! });
+      }
+    } else {
+      // Deactivating: gate first, then login — if the login write is lost,
+      // the card is already refused, which is the safe side to fail on.
+      if (target.person_id) {
+        await personRepo.updateById(String(target.person_id), { status: person_status! });
+      }
+      await userRepo.updateById(id, userUpdate);
+    }
+
+    return { id, is_active: active, person_status };
+  },
+
+  /**
+   * The set a bulk action would touch: the filter, minus privileged accounts,
+   * minus the actor. Exclusions are applied here — server-side — so a crafted
+   * request cannot reach a superadmin or registrar account.
+   */
+  async resolveBulkTargets(query: UserListQuery, actorUserId: string) {
+    const base = await userRepo.buildFilter(query);
+    const candidates = await UserModel.find(base).select('_id role').lean();
+
+    const targets: string[] = [];
+    let excluded = 0;
+    for (const c of candidates) {
+      const isProtected = BULK_PROTECTED.includes(c.role as Role);
+      const isSelf = String(c._id) === actorUserId;
+      if (isProtected || isSelf) {
+        excluded++;
+        continue;
+      }
+      targets.push(String(c._id));
+    }
+    return { targets, excluded };
+  },
+
+  async bulkPreview(query: UserListQuery, actorUserId: string) {
+    const { targets, excluded } = await this.resolveBulkTargets(query, actorUserId);
+    return { matched: targets.length, excluded };
+  },
+
+  /**
+   * Same fail-safe write order as `setStatus`: the gate is the first thing
+   * closed and the last thing opened. There is no transaction (a standalone
+   * dev Mongo has no replica set), so a partial failure between the two
+   * `updateMany` calls is possible — the order decides which side is safe.
+   *   - Deactivating: write Person (gate) first, then User (login).
+   *   - Reactivating: write User (login) first, then Person (gate).
+   */
+  async bulkSetStatus(active: boolean, query: UserListQuery, actorUserId: string) {
+    const { targets, excluded } = await this.resolveBulkTargets(query, actorUserId);
+    if (targets.length === 0) return { matched: 0, modified: 0, excluded };
+
+    const now = new Date();
+    const affected = await UserModel.find({ _id: { $in: targets } })
+      .select('person_id')
+      .lean();
+    const personIds = affected
+      .map((u) => u.person_id)
+      .filter((p): p is NonNullable<typeof p> => Boolean(p));
+
+    const userUpdate = {
+      $set: {
+        is_active: active,
+        refreshTokenHash: null,
+        deactivated_at: active ? null : now,
+        deactivated_by: active ? null : new Types.ObjectId(actorUserId),
+      },
+    };
+
+    // Narrow the User write to accounts that actually change state. Without
+    // this, a `filter: {}` lockout rewrites deactivated_at/deactivated_by on
+    // accounts someone else already deactivated, destroying that audit
+    // trail, and modifiedCount stops meaning anything. This narrowing is
+    // applied only to the write, never to target resolution: `matched`
+    // stays `targets.length` (how many the filter selected, before this
+    // idempotency check) so preview and mutation still agree; `modified` is
+    // how many rows actually flipped.
+    const userFilter = { _id: { $in: targets }, is_active: !active };
+
+    let result: { modifiedCount: number };
+    if (active) {
+      // Reactivating: login first, then gate.
+      result = await UserModel.updateMany(userFilter, userUpdate);
+      if (personIds.length) {
+        await PersonModel.updateMany({ _id: { $in: personIds } }, { $set: { status: 'active' } });
+      }
+    } else {
+      // Deactivating: gate first, then login.
+      if (personIds.length) {
+        await PersonModel.updateMany(
+          { _id: { $in: personIds } },
+          { $set: { status: 'inactive' } }
+        );
+      }
+      result = await UserModel.updateMany(userFilter, userUpdate);
+    }
+
+    return { matched: targets.length, modified: result.modifiedCount, excluded };
   },
 };

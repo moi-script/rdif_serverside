@@ -42,6 +42,7 @@ node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
 | `API_PREFIX` | Route prefix (default `/api`) |
 | `ALLOWED_ORIGINS` | Comma-separated CORS origins (e.g. `http://localhost:5173`) |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | Seed admin credentials |
+| `LOGIN_RATE_LIMIT_MAX` | Max `/auth/login` requests per 15 min (default `10`). `npm run verify:roles` makes 6 login calls per run, so running it twice in a row needs at least `20`. |
 
 ## Scripts
 
@@ -54,23 +55,28 @@ node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
 
 ## Test accounts (`npm run seed:test`)
 
-For the testing phase, `seed:test` inserts a hardcoded admin plus three students. Each
-student is a `Person` (profile + RFID) linked to a `User` login whose **username is the
-student number**.
+For the testing phase, `seed:test` inserts a hardcoded superadmin, a registrar, three
+students, and one staff member. Each student/staff person is a `Person` (profile + RFID)
+linked to a `User` login whose **username is the student/employee number**.
 
 | Role | Username | Password |
 |------|----------|----------|
-| Admin | `testadmin` | `Admin@123` |
+| Superadmin | `testadmin` | `Admin@123` |
+| Registrar | `testregistrar` | `Registrar@123` |
 | Student — Juan Dela Cruz | `2025-0001` | `Student@123` |
 | Student — Maria Santos | `2025-0002` | `Student@123` |
 | Student — Pedro Reyes | `2025-0003` | `Student@123` |
+| Staff — Ana Villanueva | `EMP-1001` | `Staff@123` |
 
 > Demo credentials for local testing only.
 
 ## Data model
 
 - **Person** — a student/staff/employee profile with an `rfid_uid` and `id_number`.
-- **User** — a login account (`role: admin | user`); a student login links to its Person via `person_id`.
+- **User** — a login account with one of four roles: `superadmin` (full control,
+  including single and bulk activate/deactivate), `registrar` (registers people and
+  creates their logins), `staff`, and `student` (own profile only). A person's login
+  links to their profile via `person_id`.
 - **Vehicle**, **Gate**, **ScanLog**, **AttendanceSummary** — RFID and attendance records.
 
 ## API overview
@@ -117,7 +123,7 @@ Each module follows a `routes → controller → service → repository → mode
 
 ## Notes
 
-- No public registration — admin is seeded, users are admin-created.
+- No public registration. The superadmin is seeded; registrars and user logins are created through the API.
 - Access token (15m) in response body; refresh token (7d) in httpOnly cookie with rotation.
 - `scan/tap` always returns HTTP 200; `granted`/`denied` is in the body.
 - After first seed, remove `ADMIN_PASSWORD` from the production `.env`.
