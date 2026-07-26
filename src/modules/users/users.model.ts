@@ -11,6 +11,7 @@ export interface IUser extends Document {
   is_active: boolean;
   deactivated_at: Date | null;
   deactivated_by: Types.ObjectId | null;
+  deleted_at: Date | null;
   refreshTokenHash: string | null;
   createdAt: Date;
 }
@@ -25,6 +26,7 @@ const userSchema = new Schema<IUser>(
     is_active: { type: Boolean, default: true },
     deactivated_at: { type: Date, default: null },
     deactivated_by: { type: Schema.Types.ObjectId, ref: 'User', default: null },
+    deleted_at: { type: Date, default: null, index: true },
     refreshTokenHash: { type: String, default: null },
   },
   { timestamps: { createdAt: true, updatedAt: false } }

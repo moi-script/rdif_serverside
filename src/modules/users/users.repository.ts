@@ -52,6 +52,11 @@ export const userRepo = {
    * Shared by list, bulk preview, and bulk mutate so all three agree.
    */
   async buildFilter(q: UserListQuery): Promise<FilterQuery<IUser>> {
+    // Deleted users are excluded everywhere this filter is used — the list, the bulk
+    // preview, and the bulk mutation. Putting it here is what stops "Activate All"
+    // from resurrecting them.
+    const base: FilterQuery<IUser> = { deleted_at: null };
+
     const personFilter: FilterQuery<Record<string, unknown>> = {};
     if (q.type) personFilter.type = q.type;
     if (q.department_section) personFilter.department_section = q.department_section;
@@ -60,13 +65,12 @@ export const userRepo = {
       personFilter.$or = [{ full_name: rx }, { id_number: rx }, { rfid_uid: rx }];
     }
 
-    const usesPersonFields = Object.keys(personFilter).length > 0;
-    if (!usesPersonFields) return {};
+    if (Object.keys(personFilter).length === 0) return base;
 
     const personIds = (await PersonModel.find(personFilter).select('_id').lean()).map(
       (p) => p._id as Types.ObjectId
     );
-    return { person_id: { $in: personIds } };
+    return { ...base, person_id: { $in: personIds } };
   },
 
   async findPaginatedWithPerson(filter: FilterQuery<IUser>, p: PaginationParams) {

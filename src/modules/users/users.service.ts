@@ -67,10 +67,34 @@ export const userService = {
     return { id, updated: true };
   },
 
-  async softDelete(id: string) {
-    const updated = await userRepo.updateById(id, { is_active: false, refreshTokenHash: null });
-    if (!updated) throw new ApiError('NOT_FOUND', 'User not found');
-    return { id, is_active: false };
+  /**
+   * Deletion is a one-way deactivation that also hides the account from every list.
+   *
+   * Person first, then user — same fail-safe rule as setStatus. If the second write is
+   * lost, the card is already refused at the gate and only the login survives.
+   */
+  async softDelete(id: string, actorUserId: string) {
+    if (id === actorUserId) {
+      throw new ApiError('FORBIDDEN', 'You cannot delete your own account');
+    }
+
+    const target = await userRepo.findById(id);
+    if (!target || target.deleted_at) throw new ApiError('NOT_FOUND', 'User not found');
+
+    if (target.person_id) {
+      await personRepo.updateById(String(target.person_id), { status: 'inactive' });
+    }
+
+    const now = new Date();
+    await userRepo.updateById(id, {
+      is_active: false,
+      deleted_at: now,
+      deactivated_at: now,
+      deactivated_by: new Types.ObjectId(actorUserId),
+      refreshTokenHash: null,
+    });
+
+    return { id, deleted: true };
   },
 
   /**
@@ -98,7 +122,7 @@ export const userService = {
     }
 
     const target = await userRepo.findById(id);
-    if (!target) throw new ApiError('NOT_FOUND', 'User not found');
+    if (!target || target.deleted_at) throw new ApiError('NOT_FOUND', 'User not found');
 
     const userUpdate = {
       is_active: active,

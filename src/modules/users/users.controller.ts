@@ -15,7 +15,7 @@ export const userController = {
     sendSuccess(res, await userService.resetPassword(req.params.id, req.body.password));
   }),
   remove: asyncHandler(async (req: Request, res: Response) => {
-    sendSuccess(res, await userService.softDelete(req.params.id));
+    sendSuccess(res, await userService.softDelete(req.params.id, req.user!.userId));
   }),
   setStatus: asyncHandler(async (req: Request, res: Response) => {
     sendSuccess(

@@ -533,6 +533,127 @@ async function main(): Promise<void> {
     true
   );
 
+  console.log('\n== deletion: real deletion, not just deactivation ==');
+
+  // A throwaway person + user, never a seeded account — deletion is one-way
+  // and would permanently corrupt a seeded fixture used by later runs.
+  const delStamp = Date.now();
+  const throwawayRfid = 'DEAD' + (delStamp % 0xffff).toString(16).toUpperCase().padStart(4, '0');
+  const throwawayIdNumber = `verify-del-${delStamp}`;
+
+  const personRes = await request(superadmin, 'POST', '/persons', {
+    full_name: 'Verify Deletion Throwaway',
+    type: 'student',
+    id_number: throwawayIdNumber,
+    department_section: 'BSIT - 4A',
+    rfid_uid: throwawayRfid,
+  });
+  expectEqual('throwaway person created', personRes.status, 201);
+  const throwawayPersonId = (personRes.json.data as { _id?: string; id?: string } | undefined)
+    ?._id ?? (personRes.json.data as { _id?: string; id?: string } | undefined)?.id;
+  if (!throwawayPersonId) throw new Error('throwaway person creation did not return an id');
+
+  const delUsername = `verify-del-${delStamp}`;
+  const delUserRes = await request(superadmin, 'POST', '/users', {
+    username: delUsername,
+    password: 'Verify@12345',
+    role: 'student',
+    person_id: throwawayPersonId,
+  });
+  expectEqual('throwaway user created', delUserRes.status, 201);
+  const throwawayUserId = (delUserRes.json.data as { id?: string } | undefined)?.id;
+  if (!throwawayUserId) throw new Error('throwaway user creation did not return an id');
+
+  const beforeDeleteList = await request(superadmin, 'GET', '/users?limit=100');
+  const beforeDeleteRows = (beforeDeleteList.json.data ?? []) as { username: string }[];
+  expectEqual(
+    'throwaway user visible before deletion',
+    beforeDeleteRows.some((u) => u.username === delUsername),
+    true
+  );
+
+  const previewBeforeDelete = await request(superadmin, 'GET', '/users/bulk-status/preview');
+  const beforeCount = (previewBeforeDelete.json.data as { matched?: number } | undefined)?.matched;
+  if (typeof beforeCount !== 'number') throw new Error('bulk preview did not return a matched count');
+
+  await check(
+    'superadmin deletes throwaway user',
+    superadmin,
+    'DELETE',
+    `/users/${throwawayUserId}`,
+    OK
+  );
+
+  const afterDeleteList = await request(superadmin, 'GET', '/users?limit=100');
+  const afterDeleteRows = (afterDeleteList.json.data ?? []) as { username: string }[];
+  expectEqual(
+    'deleted user absent from list',
+    afterDeleteRows.some((u) => u.username === delUsername),
+    false
+  );
+
+  const personAfterDelete = await request(superadmin, 'GET', `/persons/${throwawayPersonId}`);
+  expectEqual(
+    'deleted user person marked inactive (gate closed)',
+    (personAfterDelete.json.data as { status?: string } | undefined)?.status,
+    'inactive'
+  );
+
+  const previewAfterDelete = await request(superadmin, 'GET', '/users/bulk-status/preview');
+  expectEqual(
+    'bulk preview count drops by one after deletion',
+    (previewAfterDelete.json.data as { matched?: number } | undefined)?.matched,
+    beforeCount - 1
+  );
+
+  // The core of this task: Activate All must not resurrect a deleted user or
+  // reopen their gate access.
+  await check('activate all after deletion', superadmin, 'POST', '/users/bulk-status', OK, {
+    active: true,
+    filter: {},
+  });
+  const afterActivateAllList = await request(superadmin, 'GET', '/users?limit=100');
+  const afterActivateAllRows = (afterActivateAllList.json.data ?? []) as { username: string }[];
+  expectEqual(
+    'Activate All does not resurrect the deleted user',
+    afterActivateAllRows.some((u) => u.username === delUsername),
+    false
+  );
+  const personAfterActivateAll = await request(
+    superadmin,
+    'GET',
+    `/persons/${throwawayPersonId}`
+  );
+  expectEqual(
+    'Activate All does not reopen the deleted user gate access',
+    (personAfterActivateAll.json.data as { status?: string } | undefined)?.status,
+    'inactive'
+  );
+
+  await check(
+    'single-user activate on deleted user is 404',
+    superadmin,
+    'PATCH',
+    `/users/${throwawayUserId}/status`,
+    404,
+    { active: true }
+  );
+
+  const deletedLogin = await fetch(`${BASE}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: delUsername, password: 'Verify@12345' }),
+  });
+  expectEqual('deleted user cannot log in', deletedLogin.status, 401);
+
+  await check(
+    'registrar cannot delete users',
+    registrar,
+    'DELETE',
+    `/users/${throwawayUserId}`,
+    FORBIDDEN
+  );
+
   summary();
 }
 
