@@ -214,6 +214,43 @@ async function main(): Promise<void> {
   const madeStudent = createdItems.find((u) => u.username === `verify-stu-${stamp}`);
   expectEqual('created student has role student', madeStudent?.role, 'student');
 
+  console.log('\n== users list carries person data and filters ==');
+  const listRes = await request(superadmin, 'GET', '/users?limit=100');
+  const listRows = (listRes.json.data ?? []) as {
+    username: string;
+    role: string;
+    is_active: boolean;
+    person: { full_name: string; type: string; department_section: string } | null;
+  }[];
+
+  const juan = listRows.find((u) => u.username === '2025-0001');
+  expectEqual('list joins person name', juan?.person?.full_name, 'Juan Dela Cruz');
+  expectEqual('list exposes person type', juan?.person?.type, 'student');
+
+  const testadminRow = listRows.find((u) => u.username === 'testadmin');
+  expectEqual('superadmin row has no person', testadminRow?.person, null);
+
+  const filtered = await request(superadmin, 'GET', '/users?type=student&limit=100');
+  const filteredRows = (filtered.json.data ?? []) as { person: { type: string } | null }[];
+  expectEqual(
+    'type=student returns only students',
+    filteredRows.every((u) => u.person?.type === 'student'),
+    true
+  );
+
+  const bySection = await request(
+    superadmin,
+    'GET',
+    `/users?department_section=${encodeURIComponent('BSIT - 4A')}&limit=100`
+  );
+  const sectionRows = (bySection.json.data ?? []) as { username: string }[];
+  expectEqual(
+    'department filter narrows to that section',
+    sectionRows.some((u) => u.username === '2025-0001') &&
+      !sectionRows.some((u) => u.username === '2025-0002'),
+    true
+  );
+
   summary();
 }
 

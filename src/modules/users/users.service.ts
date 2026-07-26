@@ -17,7 +17,12 @@ interface CreateUserInput {
 export const userService = {
   async list(query: Record<string, string | undefined>) {
     const p = getPagination(query);
-    const { items, total } = await userRepo.findPaginated({}, p);
+    const filter = await userRepo.buildFilter({
+      type: query.type,
+      department_section: query.department_section,
+      search: query.search,
+    });
+    const { items, total } = await userRepo.findPaginatedWithPerson(filter, p);
     return { items, meta: buildMeta(total, p.page, p.limit) };
   },
 
