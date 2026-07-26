@@ -231,10 +231,12 @@ async function main(): Promise<void> {
   expectEqual('superadmin row has no person', testadminRow?.person, null);
 
   const filtered = await request(superadmin, 'GET', '/users?type=student&limit=100');
-  const filteredRows = (filtered.json.data ?? []) as { person: { type: string } | null }[];
+  const filteredRows = (filtered.json.data ?? []) as { username: string; person: { type: string } | null }[];
   expectEqual(
-    'type=student returns only students',
-    filteredRows.every((u) => u.person?.type === 'student'),
+    'type=student returns only students, and is not empty',
+    filteredRows.length > 0 &&
+      filteredRows.every((u) => u.person?.type === 'student') &&
+      filteredRows.some((u) => u.username === '2025-0001'),
     true
   );
 
