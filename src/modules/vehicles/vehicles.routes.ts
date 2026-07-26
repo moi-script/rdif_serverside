@@ -8,7 +8,7 @@ import { createVehicleSchema, updateVehicleSchema, vehicleStatusSchema } from '.
 
 export const vehicleRoutes = Router();
 
-vehicleRoutes.use(authenticate, authorize(ROLES.ADMIN));
+vehicleRoutes.use(authenticate, authorize(ROLES.SUPERADMIN));
 vehicleRoutes.get('/', vehicleController.list);
 vehicleRoutes.get('/:id', vehicleController.get);
 vehicleRoutes.post('/', validate(createVehicleSchema), vehicleController.create);

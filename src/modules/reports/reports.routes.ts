@@ -6,6 +6,6 @@ import { reportController } from './reports.controller';
 
 export const reportRoutes = Router();
 
-reportRoutes.use(authenticate, authorize(ROLES.ADMIN));
+reportRoutes.use(authenticate, authorize(ROLES.SUPERADMIN));
 reportRoutes.get('/attendance', reportController.attendance);
 reportRoutes.get('/gate-activity', reportController.gateActivity);

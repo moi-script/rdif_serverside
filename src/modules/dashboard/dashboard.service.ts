@@ -88,7 +88,9 @@ async function recentScans(limit: number) {
 
 export const dashboardService = {
   async get(actor: { role: Role; personId: string | null }) {
-    if (actor.role === ROLES.ADMIN) return this.adminView();
+    if (actor.role === ROLES.SUPERADMIN || actor.role === ROLES.REGISTRAR) {
+      return this.adminView();
+    }
     if (actor.personId) return this.userView(actor.personId);
     return { gates: await gateStatuses() }; // unlinked / guard
   },

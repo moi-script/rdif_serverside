@@ -27,7 +27,7 @@ export const userService = {
     const created = await userRepo.create({
       username: input.username,
       password_hash,
-      role: ROLES.USER,
+      role: ROLES.STUDENT,
       person_id: (input.person_id as unknown as IUser['person_id']) ?? null,
       must_change_password: true,
       is_active: true,

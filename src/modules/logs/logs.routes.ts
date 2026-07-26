@@ -6,5 +6,5 @@ import { logController } from './logs.controller';
 
 export const logRoutes = Router();
 
-logRoutes.use(authenticate, authorize(ROLES.ADMIN));
+logRoutes.use(authenticate, authorize(ROLES.SUPERADMIN));
 logRoutes.get('/', logController.list);

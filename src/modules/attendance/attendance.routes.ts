@@ -8,4 +8,4 @@ export const attendanceRoutes = Router();
 
 attendanceRoutes.use(authenticate);
 attendanceRoutes.get('/', attendanceController.list);
-attendanceRoutes.get('/summary/:person_id', authorize(ROLES.ADMIN), attendanceController.summary);
+attendanceRoutes.get('/summary/:person_id', authorize(ROLES.SUPERADMIN), attendanceController.summary);
