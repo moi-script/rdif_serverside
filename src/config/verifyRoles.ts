@@ -403,6 +403,99 @@ async function main(): Promise<void> {
     true
   );
 
+  console.log('\n== bulk activate / deactivate ==');
+
+  // Only superadmin.
+  await check(
+    'registrar cannot bulk deactivate',
+    registrar,
+    'POST',
+    '/users/bulk-status',
+    FORBIDDEN,
+    { active: false, filter: { type: 'student' } }
+  );
+  await check(
+    'registrar cannot preview bulk',
+    registrar,
+    'GET',
+    '/users/bulk-status/preview?type=student',
+    FORBIDDEN
+  );
+
+  // Preview count must match what the mutation reports.
+  const preview = await request(
+    superadmin,
+    'GET',
+    '/users/bulk-status/preview?type=student'
+  );
+  const previewData = (preview.json.data ?? {}) as { matched: number; excluded: number };
+  expectEqual('preview matches the three seeded students', previewData.matched, 3);
+
+  const bulkOff = await request(superadmin, 'POST', '/users/bulk-status', {
+    active: false,
+    filter: { type: 'student' },
+  });
+  const bulkData = (bulkOff.json.data ?? {}) as {
+    matched: number;
+    modified: number;
+    excluded: number;
+  };
+  expectEqual('bulk matched equals preview', bulkData.matched, previewData.matched);
+  expectEqual('bulk modified all three', bulkData.modified, 3);
+
+  // Every student is now off, in both places.
+  const afterBulk = await request(superadmin, 'GET', '/users?type=student&limit=100');
+  const bulkRows = (afterBulk.json.data ?? []) as {
+    is_active: boolean;
+    person: { status: string } | null;
+  }[];
+  expectEqual(
+    'all students deactivated',
+    bulkRows.length === 3 && bulkRows.every((u) => u.is_active === false),
+    true
+  );
+  expectEqual(
+    'all student cards inactive',
+    bulkRows.every((u) => u.person?.status === 'inactive'),
+    true
+  );
+
+  // Privileged accounts survive an unfiltered bulk deactivate.
+  const bulkAll = await request(superadmin, 'POST', '/users/bulk-status', {
+    active: false,
+    filter: {},
+  });
+  const bulkAllData = (bulkAll.json.data ?? {}) as { excluded: number };
+  const afterAll = await request(superadmin, 'GET', '/users?limit=100');
+  const allRows = (afterAll.json.data ?? []) as {
+    username: string;
+    role: string;
+    is_active: boolean;
+  }[];
+  expectEqual(
+    'superadmin still active after deactivate-all',
+    allRows.find((u) => u.username === 'testadmin')?.is_active,
+    true
+  );
+  expectEqual(
+    'registrar still active after deactivate-all',
+    allRows.find((u) => u.username === 'testregistrar')?.is_active,
+    true
+  );
+  expectEqual('exclusions were counted', bulkAllData.excluded >= 2, true);
+
+  // Restore everyone so the script is re-runnable.
+  await check('bulk reactivate all', superadmin, 'POST', '/users/bulk-status', OK, {
+    active: true,
+    filter: {},
+  });
+  const restored = await request(superadmin, 'GET', '/users?limit=100');
+  expectEqual(
+    'everyone restored',
+    ((restored.json.data ?? []) as { is_active: boolean }[]).every((u) => u.is_active),
+    true
+  );
+
   summary();
 }
 

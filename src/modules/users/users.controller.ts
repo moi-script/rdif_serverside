@@ -23,4 +23,20 @@ export const userController = {
       await userService.setStatus(req.params.id, req.body.active, req.user!.userId)
     );
   }),
+  bulkPreview: asyncHandler(async (req: Request, res: Response) => {
+    const q = req.query as Record<string, string | undefined>;
+    sendSuccess(
+      res,
+      await userService.bulkPreview(
+        { type: q.type, department_section: q.department_section, search: q.search },
+        req.user!.userId
+      )
+    );
+  }),
+  bulkSetStatus: asyncHandler(async (req: Request, res: Response) => {
+    sendSuccess(
+      res,
+      await userService.bulkSetStatus(req.body.active, req.body.filter ?? {}, req.user!.userId)
+    );
+  }),
 };

@@ -4,7 +4,12 @@ import { authorize } from '../../middlewares/authorize';
 import { validate } from '../../middlewares/validate';
 import { ROLES } from '../../constants/roles';
 import { userController } from './users.controller';
-import { createUserSchema, resetPasswordSchema, userStatusSchema } from './users.schema';
+import {
+  createUserSchema,
+  resetPasswordSchema,
+  userStatusSchema,
+  bulkStatusSchema,
+} from './users.schema';
 
 export const userRoutes = Router();
 
@@ -27,6 +32,21 @@ userRoutes.patch(
   userController.resetPassword
 );
 userRoutes.delete('/:id', authorize(ROLES.SUPERADMIN), userController.remove);
+
+// Bulk routes must be registered above `/:id/status` — Express matches in
+// declaration order, and `bulk-status` would otherwise be captured by `:id`.
+userRoutes.get(
+  '/bulk-status/preview',
+  authorize(ROLES.SUPERADMIN),
+  userController.bulkPreview
+);
+userRoutes.post(
+  '/bulk-status',
+  authorize(ROLES.SUPERADMIN),
+  validate(bulkStatusSchema),
+  userController.bulkSetStatus
+);
+
 userRoutes.patch(
   '/:id/status',
   authorize(ROLES.SUPERADMIN),

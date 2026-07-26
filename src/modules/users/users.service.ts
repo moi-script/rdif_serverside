@@ -1,11 +1,12 @@
 import bcrypt from 'bcrypt';
 import { Types } from 'mongoose';
-import { userRepo } from './users.repository';
-import { IUser } from './users.model';
+import { userRepo, UserListQuery } from './users.repository';
+import { IUser, UserModel } from './users.model';
 import { ApiError } from '../../utils/ApiError';
 import { getPagination, buildMeta } from '../../utils/pagination';
 import { ROLES, Role, BULK_PROTECTED } from '../../constants/roles';
 import { personRepo } from '../persons/persons.repository';
+import { PersonModel } from '../persons/persons.model';
 
 const BCRYPT_ROUNDS = 12;
 
@@ -128,5 +129,83 @@ export const userService = {
     }
 
     return { id, is_active: active, person_status };
+  },
+
+  /**
+   * The set a bulk action would touch: the filter, minus privileged accounts,
+   * minus the actor. Exclusions are applied here — server-side — so a crafted
+   * request cannot reach a superadmin or registrar account.
+   */
+  async resolveBulkTargets(query: UserListQuery, actorUserId: string) {
+    const base = await userRepo.buildFilter(query);
+    const candidates = await UserModel.find(base).select('_id role').lean();
+
+    const targets: string[] = [];
+    let excluded = 0;
+    for (const c of candidates) {
+      const isProtected = BULK_PROTECTED.includes(c.role as Role);
+      const isSelf = String(c._id) === actorUserId;
+      if (isProtected || isSelf) {
+        excluded++;
+        continue;
+      }
+      targets.push(String(c._id));
+    }
+    return { targets, excluded };
+  },
+
+  async bulkPreview(query: UserListQuery, actorUserId: string) {
+    const { targets, excluded } = await this.resolveBulkTargets(query, actorUserId);
+    return { matched: targets.length, excluded };
+  },
+
+  /**
+   * Same fail-safe write order as `setStatus`: the gate is the first thing
+   * closed and the last thing opened. There is no transaction (a standalone
+   * dev Mongo has no replica set), so a partial failure between the two
+   * `updateMany` calls is possible — the order decides which side is safe.
+   *   - Deactivating: write Person (gate) first, then User (login).
+   *   - Reactivating: write User (login) first, then Person (gate).
+   */
+  async bulkSetStatus(active: boolean, query: UserListQuery, actorUserId: string) {
+    const { targets, excluded } = await this.resolveBulkTargets(query, actorUserId);
+    if (targets.length === 0) return { matched: 0, modified: 0, excluded };
+
+    const now = new Date();
+    const affected = await UserModel.find({ _id: { $in: targets } })
+      .select('person_id')
+      .lean();
+    const personIds = affected
+      .map((u) => u.person_id)
+      .filter((p): p is NonNullable<typeof p> => Boolean(p));
+
+    const userUpdate = {
+      $set: {
+        is_active: active,
+        refreshTokenHash: null,
+        deactivated_at: active ? null : now,
+        deactivated_by: active ? null : new Types.ObjectId(actorUserId),
+      },
+    };
+
+    let result: { modifiedCount: number };
+    if (active) {
+      // Reactivating: login first, then gate.
+      result = await UserModel.updateMany({ _id: { $in: targets } }, userUpdate);
+      if (personIds.length) {
+        await PersonModel.updateMany({ _id: { $in: personIds } }, { $set: { status: 'active' } });
+      }
+    } else {
+      // Deactivating: gate first, then login.
+      if (personIds.length) {
+        await PersonModel.updateMany(
+          { _id: { $in: personIds } },
+          { $set: { status: 'inactive' } }
+        );
+      }
+      result = await UserModel.updateMany({ _id: { $in: targets } }, userUpdate);
+    }
+
+    return { matched: targets.length, modified: result.modifiedCount, excluded };
   },
 };

@@ -15,3 +15,14 @@ export const resetPasswordSchema = z.object({
 export const userStatusSchema = z.object({
   active: z.boolean(),
 });
+
+export const bulkStatusSchema = z.object({
+  active: z.boolean(),
+  filter: z
+    .object({
+      type: z.string().optional(),
+      department_section: z.string().optional(),
+      search: z.string().optional(),
+    })
+    .default({}),
+});
