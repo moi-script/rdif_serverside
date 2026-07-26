@@ -166,6 +166,54 @@ async function main(): Promise<void> {
   await check('registrar GET /users', registrar, 'GET', '/users', OK);
   await check('student GET /users denied', student, 'GET', '/users', FORBIDDEN);
 
+  console.log('\n== user creation is role-aware ==');
+  const CREATED = 201;
+  const stamp = Date.now();
+
+  // Registrar may create a student login.
+  await check(
+    'registrar creates student login',
+    registrar,
+    'POST',
+    '/users',
+    CREATED,
+    { username: `verify-stu-${stamp}`, password: 'Verify@12345', role: 'student' }
+  );
+
+  // Registrar may not create privileged accounts.
+  await check(
+    'registrar cannot create registrar',
+    registrar,
+    'POST',
+    '/users',
+    FORBIDDEN,
+    { username: `verify-reg-${stamp}`, password: 'Verify@12345', role: 'registrar' }
+  );
+  await check(
+    'registrar cannot create superadmin',
+    registrar,
+    'POST',
+    '/users',
+    FORBIDDEN,
+    { username: `verify-sa-${stamp}`, password: 'Verify@12345', role: 'superadmin' }
+  );
+
+  // Superadmin may create a registrar.
+  await check(
+    'superadmin creates registrar',
+    superadmin,
+    'POST',
+    '/users',
+    CREATED,
+    { username: `verify-reg2-${stamp}`, password: 'Verify@12345', role: 'registrar' }
+  );
+
+  // The stored role must be what was requested.
+  const createdList = await request(superadmin, 'GET', '/users?limit=100');
+  const createdItems = (createdList.json.data ?? []) as { username: string; role: string }[];
+  const madeStudent = createdItems.find((u) => u.username === `verify-stu-${stamp}`);
+  expectEqual('created student has role student', madeStudent?.role, 'student');
+
   summary();
 }
 

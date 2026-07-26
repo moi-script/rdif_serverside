@@ -9,7 +9,7 @@ export const userController = {
     sendSuccess(res, items, 200, meta);
   }),
   create: asyncHandler(async (req: Request, res: Response) => {
-    sendSuccess(res, await userService.create(req.body), 201);
+    sendSuccess(res, await userService.create(req.body, req.user!.role), 201);
   }),
   resetPassword: asyncHandler(async (req: Request, res: Response) => {
     sendSuccess(res, await userService.resetPassword(req.params.id, req.body.password));

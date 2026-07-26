@@ -3,13 +3,14 @@ import { userRepo } from './users.repository';
 import { IUser } from './users.model';
 import { ApiError } from '../../utils/ApiError';
 import { getPagination, buildMeta } from '../../utils/pagination';
-import { ROLES } from '../../constants/roles';
+import { ROLES, Role, BULK_PROTECTED } from '../../constants/roles';
 
 const BCRYPT_ROUNDS = 12;
 
 interface CreateUserInput {
   username: string;
   password: string;
+  role: Role;
   person_id?: string | null;
 }
 
@@ -20,14 +21,20 @@ export const userService = {
     return { items, meta: buildMeta(total, p.page, p.limit) };
   },
 
-  async create(input: CreateUserInput) {
+  async create(input: CreateUserInput, actorRole: Role) {
+    // A registrar registers people; only a superadmin mints privileged accounts.
+    if (actorRole !== ROLES.SUPERADMIN && BULK_PROTECTED.includes(input.role)) {
+      throw new ApiError('FORBIDDEN', 'Only a superadmin can create privileged accounts');
+    }
+
     const existing = await userRepo.findByUsername(input.username);
     if (existing) throw new ApiError('DUPLICATE_USERNAME');
+
     const password_hash = await bcrypt.hash(input.password, BCRYPT_ROUNDS);
     const created = await userRepo.create({
       username: input.username,
       password_hash,
-      role: ROLES.STUDENT,
+      role: input.role,
       person_id: (input.person_id as unknown as IUser['person_id']) ?? null,
       must_change_password: true,
       is_active: true,

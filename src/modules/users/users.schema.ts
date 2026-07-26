@@ -1,9 +1,10 @@
 import { z } from 'zod';
+import { ALL_ROLES } from '../../constants/roles';
 
 export const createUserSchema = z.object({
   username: z.string().min(3),
   password: z.string().min(8),
-  role: z.enum(['user']).default('user'), // admins are seeded only, never created via API
+  role: z.enum(ALL_ROLES as unknown as [string, ...string[]]),
   person_id: z.string().nullable().optional(),
 });
 
