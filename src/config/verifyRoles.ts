@@ -564,6 +564,9 @@ async function main(): Promise<void> {
   const throwawayUserId = (delUserRes.json.data as { id?: string } | undefined)?.id;
   if (!throwawayUserId) throw new Error('throwaway user creation did not return an id');
 
+  // Relies on the just-created throwaway user landing on this first page: the
+  // list sorts by createdAt descending, so the newest row is always here
+  // regardless of how many accounts exist overall.
   const beforeDeleteList = await request(superadmin, 'GET', '/users?limit=100');
   const beforeDeleteRows = (beforeDeleteList.json.data ?? []) as { username: string }[];
   expectEqual(

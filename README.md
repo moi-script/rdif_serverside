@@ -42,6 +42,7 @@ node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
 | `API_PREFIX` | Route prefix (default `/api`) |
 | `ALLOWED_ORIGINS` | Comma-separated CORS origins (e.g. `http://localhost:5173`) |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | Seed admin credentials |
+| `LOGIN_RATE_LIMIT_MAX` | Max `/auth/login` requests per 15 min (default `10`). `npm run verify:roles` makes 6 login calls per run, so running it twice in a row needs at least `20`. |
 
 ## Scripts
 
