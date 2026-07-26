@@ -327,7 +327,7 @@ async function main(): Promise<void> {
   const mainGate = gateList.find((g) => g.name === 'Main Entrance');
   const gateId = (mainGate?._id ?? mainGate?.id) as string;
   const tap = await request(superadmin, 'POST', '/scan/tap', {
-    rfid_uid: 'RFID-STU-0001',
+    rfid_uid: 'A1B2C3D4',
     gate_id: gateId,
     direction: 'entry',
   });
