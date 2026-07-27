@@ -74,10 +74,10 @@ const HARDCODED_PEOPLE: {
 ];
 
 const GATES = [
-  { name: 'Main Entrance', type: 'person' as const, location: 'Front Building Gate A' },
-  { name: 'Side Gate', type: 'person' as const, location: 'South Wing Gate B' },
-  { name: 'Parking Entrance', type: 'vehicle' as const, location: 'Parking Lot Entry' },
-  { name: 'Parking Exit', type: 'vehicle' as const, location: 'Parking Lot Exit' },
+  { name: 'Main Entrance', type: 'person' as const, direction: 'entry' as const, location: 'Front Building Gate A' },
+  { name: 'Side Gate', type: 'person' as const, direction: 'exit' as const, location: 'South Wing Gate B' },
+  { name: 'Parking Entrance', type: 'vehicle' as const, direction: 'entry' as const, location: 'Parking Lot Entry' },
+  { name: 'Parking Exit', type: 'vehicle' as const, direction: 'exit' as const, location: 'Parking Lot Exit' },
 ];
 
 // Old-style usernames from the first seed run — remove so logins are clean.
@@ -149,11 +149,9 @@ async function seedDemoActivity(persons: IPerson[]): Promise<void> {
   // Gates (idempotent by name)
   const gateMap: Record<string, Types.ObjectId> = {};
   for (const g of GATES) {
-    let gate = await GateModel.findOne({ name: g.name });
-    if (!gate) {
-      gate = await GateModel.create(g);
-      console.log(`[test-seed] created gate '${g.name}'`);
-    }
+    await GateModel.updateOne({ name: g.name }, { $set: g }, { upsert: true });
+    const gate = await GateModel.findOne({ name: g.name });
+    if (!gate) throw new Error(`[test-seed] gate '${g.name}' missing after upsert`);
     gateMap[g.name] = gate._id;
   }
 

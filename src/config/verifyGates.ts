@@ -242,6 +242,30 @@ async function main(): Promise<void> {
   const afterDeleteMaria = await fetch(`${BASE}/persons/${otherId}/photo`, { headers: auth(registrar) });
   expectEqual("second person's deleted photo returns 404", afterDeleteMaria.status, 404);
 
+  console.log('\n== gate direction ==');
+  const gatesRes = await request(superadmin, 'GET', '/gates');
+  const gates = (gatesRes.json.data ?? []) as {
+    _id: string;
+    name: string;
+    type: string;
+    direction?: string;
+  }[];
+  expectEqual('all four gates are seeded', gates.length, 4);
+
+  const expectedGates: Record<string, { type: string; direction: string }> = {
+    'Main Entrance': { type: 'person', direction: 'entry' },
+    'Side Gate': { type: 'person', direction: 'exit' },
+    'Parking Entrance': { type: 'vehicle', direction: 'entry' },
+    'Parking Exit': { type: 'vehicle', direction: 'exit' },
+  };
+  for (const [name, want] of Object.entries(expectedGates)) {
+    const gate = gates.find((g) => g.name === name);
+    // Comparing undefined to undefined would pass vacuously; assert presence first.
+    expectEqual(`gate '${name}' exists`, !!gate, true);
+    expectEqual(`gate '${name}' type`, gate?.type, want.type);
+    expectEqual(`gate '${name}' direction`, gate?.direction, want.direction);
+  }
+
   summary();
 }
 
