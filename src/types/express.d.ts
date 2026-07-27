@@ -1,9 +1,10 @@
-import { AuthUser } from './index';
+import { AuthUser, GateContext } from './index';
 
 declare global {
   namespace Express {
     interface Request {
       user?: AuthUser;
+      gate?: GateContext;
     }
   }
 }

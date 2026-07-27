@@ -279,6 +279,29 @@ async function main(): Promise<void> {
     expectEqual(`gate '${name}' direction`, gate?.direction, want.direction);
   }
 
+  console.log('\n== device key minting ==');
+  const mainGate = gates.find((g) => g.name === 'Main Entrance');
+  const parkingIn = gates.find((g) => g.name === 'Parking Entrance');
+  if (!mainGate || !parkingIn) throw new Error('expected gates missing — run npm run seed:test');
+
+  const registrarMint = await request(registrar, 'POST', `/gates/${mainGate._id}/key`);
+  expectEqual('registrar cannot mint a key', registrarMint.status, 403);
+
+  const firstMint = await request(superadmin, 'POST', `/gates/${mainGate._id}/key`);
+  expectEqual('superadmin can mint a key', firstMint.status, 201);
+  const firstKey = (firstMint.json.data as { key?: string } | undefined)?.key;
+  expectEqual('minted key has the documented shape', /^gk_live_[0-9a-f]{40}$/.test(firstKey ?? ''), true);
+
+  const parkingMint = await request(superadmin, 'POST', `/gates/${parkingIn._id}/key`);
+  const parkingKey = (parkingMint.json.data as { key?: string } | undefined)?.key;
+  expectEqual('parking key minted', typeof parkingKey, 'string');
+
+  // Minting again must revoke the first key.
+  const secondMint = await request(superadmin, 'POST', `/gates/${mainGate._id}/key`);
+  const secondKey = (secondMint.json.data as { key?: string } | undefined)?.key;
+  expectEqual('second mint succeeded', secondMint.status, 201);
+  expectEqual('second key differs from the first', firstKey !== secondKey, true);
+
   summary();
 }
 
