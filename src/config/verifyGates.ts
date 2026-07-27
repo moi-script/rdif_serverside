@@ -39,6 +39,75 @@ const WEBP = Buffer.concat([
 ]);
 const TEXT = Buffer.from('this is not an image at all, not even close');
 
+const BASE = process.env.VERIFY_BASE_URL ?? 'http://localhost:3000/api';
+
+async function login(username: string, password: string): Promise<string> {
+  const res = await fetch(`${BASE}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  const body = (await res.json()) as { data?: { accessToken?: string } };
+  const token = body.data?.accessToken;
+  if (!token) throw new Error(`login failed for '${username}' (HTTP ${res.status})`);
+  return token;
+}
+
+async function request(
+  token: string | null,
+  method: string,
+  path: string,
+  body?: unknown
+): Promise<{ status: number; json: Record<string, unknown> }> {
+  const res = await fetch(`${BASE}${path}`, {
+    method,
+    headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  let json: Record<string, unknown> = {};
+  try {
+    json = (await res.json()) as Record<string, unknown>;
+  } catch {
+    // Some responses have no JSON body; the status is what matters.
+  }
+  return { status: res.status, json };
+}
+
+/** Posts a multipart photo. `headers` supplies the credential (Bearer or X-Gate-Key). */
+async function uploadPhoto(
+  headers: Record<string, string>,
+  personId: string,
+  bytes: Buffer,
+  filename: string,
+  declaredMime: string
+): Promise<{ status: number; json: Record<string, unknown> }> {
+  const form = new FormData();
+  form.append('photo', new Blob([bytes as unknown as BlobPart], { type: declaredMime }), filename);
+  const res = await fetch(`${BASE}/persons/${personId}/photo`, {
+    method: 'POST',
+    headers,
+    body: form,
+  });
+  let json: Record<string, unknown> = {};
+  try {
+    json = (await res.json()) as Record<string, unknown>;
+  } catch {
+    // no body
+  }
+  return { status: res.status, json };
+}
+
+/** A real 1x1 JPEG, so uploads exercise the same path a browser would. */
+const TINY_JPEG = Buffer.from(
+  '/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0a' +
+    'HBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAA' +
+    'AAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==',
+  'base64'
+);
+
 async function main(): Promise<void> {
   console.log('\n== magic-byte detection ==');
   expectEqual('jpeg detected', detectImageType(JPEG), 'image/jpeg');
@@ -47,6 +116,81 @@ async function main(): Promise<void> {
   expectEqual('text rejected', detectImageType(TEXT), null);
   expectEqual('empty buffer rejected', detectImageType(Buffer.alloc(0)), null);
   expectEqual('truncated jpeg rejected', detectImageType(Buffer.from([0xff, 0xd8])), null);
+
+  const superadmin = await login('testadmin', 'Admin@123');
+  const registrar = await login('testregistrar', 'Registrar@123');
+  const student = await login('2025-0001', 'Student@123');
+  const auth = (t: string) => ({ Authorization: `Bearer ${t}` });
+
+  // Juan Dela Cruz — seeded by seed:test.
+  const list = await request(superadmin, 'GET', '/persons?limit=100');
+  const persons = (list.json.data ?? []) as { _id: string; id_number: string }[];
+  if (persons.length < 4) {
+    throw new Error(`expected at least 4 seeded persons, got ${persons.length}`);
+  }
+  const juan = persons.find((p) => p.id_number === '2025-0001');
+  if (!juan) throw new Error('seeded person 2025-0001 not found — run npm run seed:test');
+  const personId = juan._id;
+
+  console.log('\n== photo upload validation ==');
+
+  const notAnImage = await uploadPhoto(
+    auth(registrar),
+    personId,
+    Buffer.from('definitely not an image, but I claim to be a jpeg'),
+    'evil.jpg',
+    'image/jpeg'
+  );
+  expectEqual('non-image with jpeg mime rejected', notAnImage.status, 422);
+
+  const tooBig = await uploadPhoto(
+    auth(registrar),
+    personId,
+    Buffer.concat([TINY_JPEG, Buffer.alloc(1_100_000, 0x20)]),
+    'huge.jpg',
+    'image/jpeg'
+  );
+  expectEqual('over-1MB upload rejected', tooBig.status, 413);
+
+  console.log('\n== photo upload, serve, replace ==');
+
+  const first = await uploadPhoto(auth(registrar), personId, TINY_JPEG, 'a.jpg', 'image/jpeg');
+  expectEqual('registrar can upload', first.status, 201);
+  expectEqual(
+    'photo_url points at the internal route',
+    (first.json.data as { photo_url?: string } | undefined)?.photo_url,
+    `/persons/${personId}/photo`
+  );
+
+  const second = await uploadPhoto(auth(registrar), personId, TINY_JPEG, 'b.jpg', 'image/jpeg');
+  expectEqual('re-upload replaces rather than erroring', second.status, 201);
+
+  // The delete at the end of this block proves the re-upload replaced rather
+  // than duplicated: if two documents existed, deleteOne would leave one behind
+  // and the final 404 assertion would fail.
+  const asStudent = await fetch(`${BASE}/persons/${personId}/photo`, {
+    headers: auth(student),
+  });
+  expectEqual('any authenticated user may fetch a photo', asStudent.status, 200);
+  expectEqual(
+    'photo served as image/jpeg',
+    asStudent.headers.get('content-type'),
+    'image/jpeg'
+  );
+  expectEqual(
+    'photo served with nosniff',
+    asStudent.headers.get('x-content-type-options'),
+    'nosniff'
+  );
+
+  const noCred = await fetch(`${BASE}/persons/${personId}/photo`);
+  expectEqual('photo requires a credential', noCred.status, 401);
+
+  // Restore: the seed leaves Juan without a photo, so remove what we added.
+  const cleaned = await request(superadmin, 'DELETE', `/persons/${personId}/photo`);
+  expectEqual('photo deleted', cleaned.status, 200);
+  const afterDelete = await fetch(`${BASE}/persons/${personId}/photo`, { headers: auth(student) });
+  expectEqual('deleted photo returns 404', afterDelete.status, 404);
 
   summary();
 }
