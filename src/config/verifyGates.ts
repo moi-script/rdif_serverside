@@ -231,6 +231,19 @@ async function main(): Promise<void> {
   });
   expectEqual('superadmin may fetch any photo', superadminAny.status, 200);
 
+  console.log('\n== profile carries photo_url ==');
+  const overview = await request(superadmin, 'GET', `/persons/${personId}/overview`);
+  const overviewPerson = (overview.json.data as { person?: { photo_url?: string | null } } | undefined)
+    ?.person;
+  // Presence floor before comparing, so a missing person object cannot make
+  // the field assertion pass vacuously.
+  expectEqual('overview returns a person', !!overviewPerson, true);
+  expectEqual(
+    'overview carries the internal photo_url',
+    overviewPerson?.photo_url,
+    `/persons/${personId}/photo`
+  );
+
   // Restore: the seed leaves Juan and Maria without photos, so remove what we added.
   const cleaned = await request(superadmin, 'DELETE', `/persons/${personId}/photo`);
   expectEqual('photo deleted', cleaned.status, 200);

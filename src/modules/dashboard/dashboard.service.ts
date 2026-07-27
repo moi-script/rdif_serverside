@@ -222,6 +222,7 @@ export const dashboardService = {
             contact_email: person.contact_email ?? null,
             rfid_uid: person.rfid_uid,
             status: person.status,
+            photo_url: person.photo_url ?? null,
           }
         : null,
       today: today
