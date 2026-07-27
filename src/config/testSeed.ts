@@ -318,7 +318,7 @@ async function seedTest(): Promise<void> {
   // ---- Admin ----
   const existingAdmin = await UserModel.findOne({ username: HARDCODED_ADMIN.username });
   if (existingAdmin) {
-    console.log(`[test-seed] admin '${HARDCODED_ADMIN.username}' already exists — skipping`);
+    console.log(`[test-seed] superadmin '${HARDCODED_ADMIN.username}' already exists — skipping`);
   } else {
     const password_hash = await bcrypt.hash(HARDCODED_ADMIN.password, 12);
     await UserModel.create({
@@ -330,7 +330,7 @@ async function seedTest(): Promise<void> {
       is_active: true,
     });
     console.log(
-      `[test-seed] created admin '${HARDCODED_ADMIN.username}' (password: ${HARDCODED_ADMIN.password})`
+      `[test-seed] created superadmin '${HARDCODED_ADMIN.username}' (password: ${HARDCODED_ADMIN.password})`
     );
   }
 

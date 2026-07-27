@@ -88,11 +88,50 @@ async function recentScans(limit: number) {
 
 export const dashboardService = {
   async get(actor: { role: Role; personId: string | null }) {
-    if (actor.role === ROLES.SUPERADMIN || actor.role === ROLES.REGISTRAR) {
+    if (actor.role === ROLES.SUPERADMIN) {
       return this.adminView();
+    }
+    if (actor.role === ROLES.REGISTRAR) {
+      return this.registrarView();
     }
     if (actor.personId) return this.userView(actor.personId);
     return { gates: await gateStatuses() }; // unlinked / guard
+  },
+
+  /**
+   * Registration-focused summary for the registrar: counts and recent
+   * registrations only. No scan data, no gate data, no vehicle data, no
+   * plate numbers, no RFID UIDs — the registrar has no Overview or Parking
+   * tab and is denied /logs, /scan/logs, /reports/*, and /vehicles/*, so
+   * the dashboard must not hand that class of data back either.
+   */
+  async registrarView() {
+    const [total_persons, by_type, recent] = await Promise.all([
+      PersonModel.countDocuments({}),
+      PersonModel.aggregate([{ $group: { _id: '$type', count: { $sum: 1 } } }]),
+      PersonModel.find()
+        .sort({ createdAt: -1 })
+        .limit(8)
+        .select('full_name type department_section id_number createdAt')
+        .lean(),
+    ]);
+
+    const persons_by_type = { student: 0, staff: 0, employee: 0 };
+    for (const row of by_type as { _id: keyof typeof persons_by_type; count: number }[]) {
+      if (row._id in persons_by_type) persons_by_type[row._id] = row.count;
+    }
+
+    return {
+      total_persons,
+      persons_by_type,
+      recent_registrations: recent.map((p) => ({
+        full_name: p.full_name,
+        type: p.type,
+        department_section: p.department_section ?? null,
+        id_number: p.id_number,
+        createdAt: p.createdAt,
+      })),
+    };
   },
 
   async adminView() {

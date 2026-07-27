@@ -151,6 +151,31 @@ async function main(): Promise<void> {
     await check(`${name} GET /gates`, token, 'GET', '/gates', OK);
   }
 
+  console.log('\n== registrar dashboard is registration-only (no scan/gate/vehicle leak) ==');
+  const registrarDashboard = await request(registrar, 'GET', '/dashboard');
+  expectEqual('registrar dashboard responds 200', registrarDashboard.status, OK);
+  const registrarDashboardData = (registrarDashboard.json.data ?? {}) as Record<string, unknown>;
+  expectEqual(
+    'registrar dashboard carries registration data',
+    typeof registrarDashboardData.total_persons === 'number',
+    true
+  );
+  expectEqual(
+    'registrar dashboard has no recent_scans key',
+    Object.prototype.hasOwnProperty.call(registrarDashboardData, 'recent_scans'),
+    false
+  );
+  expectEqual(
+    'registrar dashboard has no parking_activity key',
+    Object.prototype.hasOwnProperty.call(registrarDashboardData, 'parking_activity'),
+    false
+  );
+  expectEqual(
+    'registrar dashboard has no gates key',
+    Object.prototype.hasOwnProperty.call(registrarDashboardData, 'gates'),
+    false
+  );
+
   console.log('\n== attendance: superadmin, staff, and student may read; registrar may not ==');
   for (const [name, token] of [
     ['superadmin', superadmin],
@@ -532,6 +557,68 @@ async function main(): Promise<void> {
       restoredWithPerson.every((u) => u.person?.status === 'active'),
     true
   );
+
+  console.log('\n== bulk activate must not reopen a gate closed independently ==');
+
+  // A superadmin kills a lost card via PATCH /persons/:id/status while
+  // leaving the login active. Juan's User row is already active, so a later
+  // "Activate all" must not touch his Person row — only users whose row
+  // actually flips from inactive -> active should have their person
+  // re-activated.
+  const juanPersonId = juanRow.person.id;
+  await check(
+    'superadmin deactivates card only (login stays active)',
+    superadmin,
+    'PATCH',
+    `/persons/${juanPersonId}/status`,
+    OK,
+    { status: 'inactive' }
+  );
+
+  const beforeActivateAll = await request(superadmin, 'GET', '/users?limit=100');
+  const beforeActivateAllRow = ((beforeActivateAll.json.data ?? []) as typeof statusRows).find(
+    (u) => u.username === '2025-0001'
+  );
+  expectEqual(
+    'login still active after card-only deactivation',
+    (beforeActivateAllRow as unknown as { is_active: boolean } | undefined)?.is_active,
+    true
+  );
+  expectEqual(
+    'card is inactive before bulk activate',
+    beforeActivateAllRow?.person?.status,
+    'inactive'
+  );
+
+  await check('bulk activate all (card-only scenario)', superadmin, 'POST', '/users/bulk-status', OK, {
+    active: true,
+    filter: {},
+  });
+
+  const afterActivateAllCard = await request(superadmin, 'GET', '/users?limit=100');
+  const afterActivateAllCardRow = ((afterActivateAllCard.json.data ?? []) as typeof statusRows).find(
+    (u) => u.username === '2025-0001'
+  );
+  expectEqual(
+    'bulk activate does not reopen an independently-closed gate',
+    afterActivateAllCardRow?.person?.status,
+    'inactive'
+  );
+
+  // Restore state so the harness stays re-runnable.
+  await check(
+    'superadmin restores the card',
+    superadmin,
+    'PATCH',
+    `/persons/${juanPersonId}/status`,
+    OK,
+    { status: 'active' }
+  );
+  const restoredCard = await request(superadmin, 'GET', '/users?limit=100');
+  const restoredCardRow = ((restoredCard.json.data ?? []) as typeof statusRows).find(
+    (u) => u.username === '2025-0001'
+  );
+  expectEqual('card restored to active', restoredCardRow?.person?.status, 'active');
 
   console.log('\n== deletion: real deletion, not just deactivation ==');
 

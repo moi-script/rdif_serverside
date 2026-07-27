@@ -57,6 +57,9 @@ export const userService = {
   },
 
   async resetPassword(id: string, password: string) {
+    const target = await userRepo.findById(id);
+    if (!target || target.deleted_at) throw new ApiError('NOT_FOUND', 'User not found');
+
     const password_hash = await bcrypt.hash(password, BCRYPT_ROUNDS);
     const updated = await userRepo.updateById(id, {
       password_hash,
@@ -137,8 +140,10 @@ export const userService = {
     }
 
     if (active) {
-      // Reactivating: login first, then gate — either order is safe here,
-      // but this keeps a symmetric "user is the login side" mental model.
+      // Reactivating: login first, then gate. This order is load-bearing,
+      // not stylistic — see the docblock above: if the second write (the
+      // Person/gate side) is lost, the login works but the gate stays shut,
+      // which is the safe side to fail on. Do not swap these two lines.
       await userRepo.updateById(id, userUpdate);
       if (target.person_id) {
         await personRepo.updateById(String(target.person_id), { status: person_status! });
@@ -196,12 +201,6 @@ export const userService = {
     if (targets.length === 0) return { matched: 0, modified: 0, excluded };
 
     const now = new Date();
-    const affected = await UserModel.find({ _id: { $in: targets } })
-      .select('person_id')
-      .lean();
-    const personIds = affected
-      .map((u) => u.person_id)
-      .filter((p): p is NonNullable<typeof p> => Boolean(p));
 
     const userUpdate = {
       $set: {
@@ -224,13 +223,35 @@ export const userService = {
 
     let result: { modifiedCount: number };
     if (active) {
-      // Reactivating: login first, then gate.
+      // Reactivating: login first, then gate. The Person write here must be
+      // narrowed the same way the User write is narrowed above — otherwise a
+      // person whose card was independently deactivated (e.g. via
+      // PATCH /persons/:id/status while the login stayed active) would be
+      // silently re-activated just because their *user* row happened to be
+      // among the targets and was already active. Query the users matching
+      // `userFilter` (i.e. actually flipping is_active: false -> true)
+      // *before* the update, and only touch those users' persons.
+      const flipping = await UserModel.find(userFilter).select('person_id').lean();
+      const personIds = flipping
+        .map((u) => u.person_id)
+        .filter((p): p is NonNullable<typeof p> => Boolean(p));
+
       result = await UserModel.updateMany(userFilter, userUpdate);
       if (personIds.length) {
         await PersonModel.updateMany({ _id: { $in: personIds } }, { $set: { status: 'active' } });
       }
     } else {
-      // Deactivating: gate first, then login.
+      // Deactivating: gate first, then login. Every targeted person is
+      // closed regardless of whether their user row already matches —
+      // closing a gate that's already closed is harmless, and narrowing it
+      // here could leave a gate open. Do not narrow this branch.
+      const affected = await UserModel.find({ _id: { $in: targets } })
+        .select('person_id')
+        .lean();
+      const personIds = affected
+        .map((u) => u.person_id)
+        .filter((p): p is NonNullable<typeof p> => Boolean(p));
+
       if (personIds.length) {
         await PersonModel.updateMany(
           { _id: { $in: personIds } },
