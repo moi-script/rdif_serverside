@@ -91,7 +91,7 @@ All routes are prefixed with `API_PREFIX` (default `/api`).
 | Gates | `/api/gates` | Gate management |
 | Scan | `/api/scan` | RFID scan ingestion |
 | Attendance | `/api/attendance` | Attendance records |
-| Users | `/api/users` | User account management (admin) |
+| Users | `/api/users` | User account management (admin). `POST /users` requires an explicit `role` — it has no default. |
 | Logs | `/api/logs` | Scan/audit logs |
 | Dashboard | `/api/dashboard` | Role-aware summary (admin stats vs. student view) |
 | Reports | `/api/reports` | Reporting endpoints |
