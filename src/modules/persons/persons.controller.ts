@@ -53,9 +53,8 @@ export const personController = {
   }),
   getPhoto: asyncHandler(async (req: Request, res: Response) => {
     // A gate terminal authenticates by device key and has no req.user; it is
-    // allowed any photo. Task 8 populates req.gate.
-    // Task 7 adds the typed req.gate
-    const actor = (req as { gate?: unknown }).gate
+    // allowed any photo.
+    const actor = req.gate
       ? null
       : req.user
         ? { role: req.user.role, personId: req.user.personId }

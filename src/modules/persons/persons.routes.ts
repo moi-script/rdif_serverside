@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { authenticate } from '../../middlewares/authenticate';
+import { authenticateAny } from '../../middlewares/authenticateAny';
 import { authorize } from '../../middlewares/authorize';
 import { validate } from '../../middlewares/validate';
 import { ROLES } from '../../constants/roles';
@@ -17,8 +18,10 @@ export const personRoutes = Router();
 
 // Declared before the router-level authorize on purpose: any authenticated
 // user may fetch a photo (a student's dashboard renders their own), while
-// everything below is registrar/superadmin only.
-personRoutes.get('/:id/photo', authenticate, personController.getPhoto);
+// everything below is registrar/superadmin only. A gate terminal has no user
+// session but is the main consumer of face photos, so this route also
+// accepts a device key.
+personRoutes.get('/:id/photo', authenticateAny, personController.getPhoto);
 
 personRoutes.use(authenticate, authorize(ROLES.SUPERADMIN, ROLES.REGISTRAR));
 

@@ -75,6 +75,16 @@ export const scanService = {
       }
     }
 
+    // A gate has a fixed type now, so a person card must not open the parking
+    // barrier and a vehicle tag must not register attendance at a walking gate.
+    // Gadgets (Subsystem B) are deliberately exempt when they are added: the
+    // check applies only to person and vehicle entities.
+    if (access_result === 'granted' && entity_type !== gate.type) {
+      access_result = 'denied';
+      reason = 'wrong_gate_type';
+      personView = undefined;
+    }
+
     await scanRepo.createLog({
       rfid_uid: input.rfid_uid,
       entity_type,

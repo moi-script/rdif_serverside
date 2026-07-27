@@ -41,6 +41,17 @@ const TEXT = Buffer.from('this is not an image at all, not even close');
 
 const BASE = process.env.VERIFY_BASE_URL ?? 'http://localhost:3000/api';
 
+// Must match scanService.dateKey(), which buckets attendance by the SERVER'S
+// LOCAL calendar date. toISOString() would give the UTC date, which differs
+// from the local date for part of every day in any non-UTC timezone and makes
+// this assertion fail by the clock rather than by behavior.
+function localDateKey(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
 async function login(username: string, password: string): Promise<string> {
   const res = await fetch(`${BASE}/auth/login`, {
     method: 'POST',
@@ -301,6 +312,127 @@ async function main(): Promise<void> {
   const secondKey = (secondMint.json.data as { key?: string } | undefined)?.key;
   expectEqual('second mint succeeded', secondMint.status, 201);
   expectEqual('second key differs from the first', firstKey !== secondKey, true);
+
+  console.log('\n== tapping with a device key ==');
+  const gateKey = (h: string) => ({ 'X-Gate-Key': h, 'Content-Type': 'application/json' });
+
+  async function tap(
+    headers: Record<string, string>,
+    body: Record<string, unknown>
+  ): Promise<{ status: number; json: Record<string, unknown> }> {
+    const res = await fetch(`${BASE}/scan/tap`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+    });
+    let json: Record<string, unknown> = {};
+    try {
+      json = (await res.json()) as Record<string, unknown>;
+    } catch {
+      // no body
+    }
+    return { status: res.status, json };
+  }
+
+  if (!secondKey || !parkingKey) throw new Error('key minting did not return a key');
+
+  // Juan Dela Cruz's card, seeded active.
+  const granted = await tap(gateKey(secondKey), { rfid_uid: 'A1B2C3D4' });
+  expectEqual('valid key taps successfully', granted.status, 200);
+  expectEqual(
+    'person card granted at a person gate',
+    (granted.json.data as { access_result?: string } | undefined)?.access_result,
+    'granted'
+  );
+
+  // The device is not trusted to name its own gate.
+  const spoofed = await tap(gateKey(secondKey), {
+    rfid_uid: 'A1B2C3D4',
+    gate_id: parkingIn._id,
+    direction: 'exit',
+  });
+  expectEqual('body-supplied gate is ignored, not honoured', spoofed.status, 200);
+
+  // scanRepo.findLogsPaginated sorts scan_time: -1, so [0] is the newest row.
+  // The freshness guard keeps this from passing on some unrelated old row if
+  // that sort ever changes.
+  const logs = await request(superadmin, 'GET', '/scan/logs?limit=1');
+  const latest = (logs.json.data ?? []) as {
+    gate_id?: string;
+    direction?: string;
+    scan_time?: string;
+  }[];
+  expectEqual('a log row was written', latest.length >= 1, true);
+  expectEqual('newest log row is from this run', !!latest[0]?.scan_time, true);
+  expectEqual(
+    'newest log row is fresh',
+    latest[0]?.scan_time ? Date.now() - new Date(latest[0].scan_time).getTime() < 60_000 : false,
+    true
+  );
+  expectEqual('log records the key\'s gate, not the body\'s', latest[0]?.gate_id, mainGate._id);
+  expectEqual('log records the gate\'s direction', latest[0]?.direction, 'entry');
+
+  // A person card at a vehicle gate must not open the barrier.
+  const wrongGate = await tap(gateKey(parkingKey), { rfid_uid: 'A1B2C3D4' });
+  expectEqual(
+    'person card denied at a vehicle gate',
+    (wrongGate.json.data as { access_result?: string } | undefined)?.access_result,
+    'denied'
+  );
+  expectEqual(
+    'denial reason is wrong_gate_type',
+    (wrongGate.json.data as { reason?: string } | undefined)?.reason,
+    'wrong_gate_type'
+  );
+
+  // An exit gate must close the attendance day the entry gate opened.
+  const sideGate = gates.find((g) => g.name === 'Side Gate');
+  if (!sideGate) throw new Error('Side Gate missing — run npm run seed:test');
+  const sideMint = await request(superadmin, 'POST', `/gates/${sideGate._id}/key`);
+  const sideKey = (sideMint.json.data as { key?: string } | undefined)?.key;
+  expectEqual('side gate key minted', typeof sideKey, 'string');
+
+  const exitTap = await tap(gateKey(sideKey ?? ''), { rfid_uid: 'A1B2C3D4' });
+  expectEqual(
+    'exit gate grants',
+    (exitTap.json.data as { access_result?: string } | undefined)?.access_result,
+    'granted'
+  );
+
+  const today = localDateKey(new Date());
+  const att = await request(
+    superadmin,
+    'GET',
+    `/attendance?person_id=${personId}&from=${today}&to=${today}&limit=5`
+  );
+  const rows = (att.json.data ?? []) as { time_in?: string | null; time_out?: string | null }[];
+  // A length floor: .find on an empty array yields undefined, and every
+  // assertion below it would then compare undefined to undefined and pass.
+  expectEqual('an attendance row exists for today', rows.length >= 1, true);
+  expectEqual('entry gate recorded a time_in', !!rows[0]?.time_in, true);
+  expectEqual('exit gate recorded a time_out', !!rows[0]?.time_out, true);
+  // Re-runnable: each run's exit tap refreshes time_out to now, so this holds
+  // on the first run and every run after.
+  expectEqual(
+    'time_out came from this run',
+    rows[0]?.time_out ? Date.now() - new Date(rows[0].time_out).getTime() < 60_000 : false,
+    true
+  );
+
+  const unknownKey = await tap(gateKey('gk_live_' + 'a'.repeat(40)), { rfid_uid: 'A1B2C3D4' });
+  expectEqual('unknown key rejected', unknownKey.status, 401);
+
+  // firstKey was revoked when the second was minted.
+  const revoked = await tap(gateKey(firstKey ?? ''), { rfid_uid: 'A1B2C3D4' });
+  expectEqual('revoked key rejected', revoked.status, 401);
+
+  console.log('\n== photo fetch by a gate terminal ==');
+  await uploadPhoto(auth(registrar), personId, TINY_JPEG, 'gate.jpg', 'image/jpeg');
+  const byGate = await fetch(`${BASE}/persons/${personId}/photo`, {
+    headers: { 'X-Gate-Key': secondKey },
+  });
+  expectEqual('gate key may fetch a photo', byGate.status, 200);
+  await request(superadmin, 'DELETE', `/persons/${personId}/photo`);
 
   summary();
 }
