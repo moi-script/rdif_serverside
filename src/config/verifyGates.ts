@@ -186,11 +186,61 @@ async function main(): Promise<void> {
   const noCred = await fetch(`${BASE}/persons/${personId}/photo`);
   expectEqual('photo requires a credential', noCred.status, 401);
 
-  // Restore: the seed leaves Juan without a photo, so remove what we added.
+  console.log('\n== photo ownership ==');
+
+  const maria = persons.find((p) => p.id_number === '2025-0002');
+  // Presence floor: without this, every assertion below would compare
+  // undefined to undefined and pass vacuously.
+  expectEqual('second seeded person found', !!maria, true);
+  const otherId = maria?._id ?? '';
+
+  // Maria has no photo from any earlier step, so give her one. Without this,
+  // "student refused another person's photo" below would return 404 simply
+  // because there is nothing to fetch, regardless of any ownership check —
+  // that is exactly what made the original version of this assertion vacuous.
+  const mariaUpload = await uploadPhoto(auth(registrar), otherId, TINY_JPEG, 'maria.jpg', 'image/jpeg');
+  expectEqual('registrar can upload a photo for the second person', mariaUpload.status, 201);
+
+  // 2025-0001 is Juan; the student token belongs to Juan.
+  const ownPhoto = await fetch(`${BASE}/persons/${personId}/photo`, {
+    headers: auth(student),
+  });
+  expectEqual('student may fetch their own photo', ownPhoto.status, 200);
+
+  // Proves the photo exists right now, so the student's refusal just below
+  // can only be attributable to the ownership rule, not to a missing photo.
+  const registrarOthers = await fetch(`${BASE}/persons/${otherId}/photo`, {
+    headers: auth(registrar),
+  });
+  expectEqual("registrar may fetch the second person's photo", registrarOthers.status, 200);
+
+  const othersPhoto = await fetch(`${BASE}/persons/${otherId}/photo`, {
+    headers: auth(student),
+  });
+  // 404 not 403: a 403 would confirm the photo exists and let an
+  // unauthorized caller enumerate which ids have photos.
+  expectEqual('student refused another person\'s photo', othersPhoto.status, 404);
+
+  const registrarAny = await fetch(`${BASE}/persons/${personId}/photo`, {
+    headers: auth(registrar),
+  });
+  expectEqual('registrar may fetch any photo', registrarAny.status, 200);
+
+  const superadminAny = await fetch(`${BASE}/persons/${personId}/photo`, {
+    headers: auth(superadmin),
+  });
+  expectEqual('superadmin may fetch any photo', superadminAny.status, 200);
+
+  // Restore: the seed leaves Juan and Maria without photos, so remove what we added.
   const cleaned = await request(superadmin, 'DELETE', `/persons/${personId}/photo`);
   expectEqual('photo deleted', cleaned.status, 200);
   const afterDelete = await fetch(`${BASE}/persons/${personId}/photo`, { headers: auth(student) });
   expectEqual('deleted photo returns 404', afterDelete.status, 404);
+
+  const cleanedMaria = await request(superadmin, 'DELETE', `/persons/${otherId}/photo`);
+  expectEqual("second person's photo deleted", cleanedMaria.status, 200);
+  const afterDeleteMaria = await fetch(`${BASE}/persons/${otherId}/photo`, { headers: auth(registrar) });
+  expectEqual("second person's deleted photo returns 404", afterDeleteMaria.status, 404);
 
   summary();
 }

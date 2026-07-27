@@ -52,7 +52,15 @@ export const personController = {
     sendSuccess(res, await personPhotoService.upload(req.params.id, req.file), 201);
   }),
   getPhoto: asyncHandler(async (req: Request, res: Response) => {
-    const photo = await personPhotoService.get(req.params.id);
+    // A gate terminal authenticates by device key and has no req.user; it is
+    // allowed any photo. Task 8 populates req.gate.
+    // Task 7 adds the typed req.gate
+    const actor = (req as { gate?: unknown }).gate
+      ? null
+      : req.user
+        ? { role: req.user.role, personId: req.user.personId }
+        : null;
+    const photo = await personPhotoService.get(req.params.id, actor);
     const etag = `W/"${photo.updatedAt.getTime()}-${photo.byte_size}"`;
     // A gate terminal re-requests the same faces all day.
     if (req.headers['if-none-match'] === etag) {

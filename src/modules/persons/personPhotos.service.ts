@@ -3,6 +3,7 @@ import { personPhotoRepo } from './personPhotos.repository';
 import { PersonModel } from './persons.model';
 import { detectImageType } from '../../utils/imageType';
 import { ApiError } from '../../utils/ApiError';
+import { ROLES, Role } from '../../constants/roles';
 
 const INTERNAL_PHOTO_URL = (id: string) => `/persons/${id}/photo`;
 
@@ -31,8 +32,22 @@ export const personPhotoService = {
     return { photo_url: person.photo_url, mime: saved.mime, byte_size: saved.byte_size };
   },
 
-  async get(personId: string) {
+  /**
+   * `actor` is null for a gate terminal, which has no user session and must be
+   * able to show a guard any cardholder's face.
+   */
+  async get(personId: string, actor: { role: Role; personId: string | null } | null) {
     assertValidId(personId);
+
+    if (actor) {
+      const privileged = actor.role === ROLES.SUPERADMIN || actor.role === ROLES.REGISTRAR;
+      // 404 rather than 403: a 403 confirms the photo exists, which lets an
+      // unauthorized caller enumerate which person ids have photos.
+      if (!privileged && actor.personId !== personId) {
+        throw new ApiError('NOT_FOUND', 'No photo on file');
+      }
+    }
+
     const photo = await personPhotoRepo.findByPersonId(personId);
     if (!photo) throw new ApiError('NOT_FOUND', 'No photo on file');
     return photo;
