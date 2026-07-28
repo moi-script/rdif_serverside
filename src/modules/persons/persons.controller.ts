@@ -6,6 +6,7 @@ import { ApiError } from '../../utils/ApiError';
 import { personService } from './persons.service';
 import { dashboardService } from '../dashboard/dashboard.service';
 import { personPhotoService } from './personPhotos.service';
+import { personSignatureService } from './personSignatures.service';
 
 export const personController = {
   list: asyncHandler(async (req: Request, res: Response) => {
@@ -74,5 +75,31 @@ export const personController = {
   }),
   deletePhoto: asyncHandler(async (req: Request, res: Response) => {
     sendSuccess(res, await personPhotoService.remove(req.params.id));
+  }),
+
+  uploadSignature: asyncHandler(async (req: Request, res: Response) => {
+    if (!req.user) throw new ApiError('UNAUTHORIZED');
+    const actor = { role: req.user.role, personId: req.user.personId };
+    sendSuccess(res, await personSignatureService.upload(req.params.id, actor, req.file), 201);
+  }),
+  getSignature: asyncHandler(async (req: Request, res: Response) => {
+    if (!req.user) throw new ApiError('UNAUTHORIZED');
+    const actor = { role: req.user.role, personId: req.user.personId };
+    const signature = await personSignatureService.get(req.params.id, actor);
+    const etag = `W/"${signature.updatedAt.getTime()}-${signature.byte_size}"`;
+    if (req.headers['if-none-match'] === etag) {
+      res.status(304).end();
+      return;
+    }
+    res.setHeader('Content-Type', signature.mime);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    res.setHeader('ETag', etag);
+    res.status(200).send(signature.data);
+  }),
+  deleteSignature: asyncHandler(async (req: Request, res: Response) => {
+    if (!req.user) throw new ApiError('UNAUTHORIZED');
+    const actor = { role: req.user.role, personId: req.user.personId };
+    sendSuccess(res, await personSignatureService.remove(req.params.id, actor));
   }),
 };

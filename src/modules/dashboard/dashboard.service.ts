@@ -223,6 +223,7 @@ export const dashboardService = {
             rfid_uid: person.rfid_uid,
             status: person.status,
             photo_url: person.photo_url ?? null,
+            signature_url: person.signature_url ?? null,
             createdAt: person.createdAt,
           }
         : null,
