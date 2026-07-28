@@ -79,7 +79,9 @@ terminal posts only `{ rfid_uid }`.
 
 - `POST /gates/:id/key` (superadmin) mints a key and revokes that gate's
   previous ones. The plaintext is returned once and is not recoverable.
-- `npm run seed:test` prints one key per gate for local development.
+- `npm run seed:test` prints one key per gate for local development the first
+  time it runs; on later runs it skips minting for any gate that already has
+  an active key, so it prints nothing for gates it has already provisioned.
 - `npm run verify:gates` asserts the photo pipeline and gate behavior. It mints
   its own keys, so terminals provisioned beforehand need re-provisioning after.
 

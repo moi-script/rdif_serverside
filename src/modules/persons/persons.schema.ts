@@ -9,7 +9,7 @@ export const createPersonSchema = z.object({
   photo_url: z.string().url().optional(),
   rfid_uid: z
     .string()
-    .regex(/^[0-9A-Fa-f]+$/, 'rfid_uid must be hex')
+    .regex(/^[0-9A-Fa-f]{6,32}$/, 'rfid_uid must be 6-32 hex characters')
     .optional(),
   status: z.enum(['active', 'inactive', 'pending']).optional(),
 });
@@ -17,7 +17,7 @@ export const createPersonSchema = z.object({
 export const updatePersonSchema = createPersonSchema.partial().omit({ rfid_uid: true });
 export const statusSchema = z.object({ status: z.enum(['active', 'inactive']) });
 export const reassignRfidSchema = z.object({
-  rfid_uid: z.string().regex(/^[0-9A-Fa-f]+$/, 'rfid_uid must be hex'),
+  rfid_uid: z.string().regex(/^[0-9A-Fa-f]{6,32}$/, 'rfid_uid must be 6-32 hex characters'),
 });
 
 export const importPersonsSchema = z.object({

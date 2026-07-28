@@ -127,6 +127,14 @@ async function main(): Promise<void> {
   expectEqual('text rejected', detectImageType(TEXT), null);
   expectEqual('empty buffer rejected', detectImageType(Buffer.alloc(0)), null);
   expectEqual('truncated jpeg rejected', detectImageType(Buffer.from([0xff, 0xd8])), null);
+  // The real boundary: exactly matches the 3-byte JPEG magic but is too short
+  // for a marker byte, which is what the `buf.length >= 4` guard exists for.
+  // The 2-byte case above never reaches that guard's branch at all.
+  expectEqual(
+    'jpeg magic with no marker byte rejected',
+    detectImageType(Buffer.from([0xff, 0xd8, 0xff])),
+    null
+  );
 
   const superadmin = await login('testadmin', 'Admin@123');
   const registrar = await login('testregistrar', 'Registrar@123');
@@ -255,7 +263,13 @@ async function main(): Promise<void> {
     `/persons/${personId}/photo`
   );
 
-  // Restore: the seed leaves Juan and Maria without photos, so remove what we added.
+  // Clean up what this run added. Maria (the second seeded person) never had
+  // a seed photo, so deleting hers restores her to the pre-run state. Juan
+  // (2025-0001) is different: testSeed.ts (Task 11) now gives him a seeded
+  // placeholder photo, so deleting it here — while exercising the DELETE
+  // path — leaves the primary demo person without a face at the gate
+  // terminal until someone reseeds. That is restored at the very end of
+  // this function, after the later gate-fetch check re-uploads for him too.
   const cleaned = await request(superadmin, 'DELETE', `/persons/${personId}/photo`);
   expectEqual('photo deleted', cleaned.status, 200);
   const afterDelete = await fetch(`${BASE}/persons/${personId}/photo`, { headers: auth(student) });
@@ -384,6 +398,83 @@ async function main(): Promise<void> {
     (wrongGate.json.data as { reason?: string } | undefined)?.reason,
     'wrong_gate_type'
   );
+  // wrong_gate_type must not leak who the cardholder is to a gate they are
+  // not authorised for — checked by key absence, not by value, so this
+  // cannot pass vacuously just because the field happens to be undefined.
+  expectEqual(
+    'wrong_gate_type denial carries no identity',
+    'person' in (wrongGate.json.data as object),
+    false
+  );
+
+  console.log('\n== vehicle taps and identity ==');
+
+  // Juan's motorcycle, seeded active, at the vehicle-entry gate it belongs at.
+  const vehicleGranted = await tap(gateKey(parkingKey), { rfid_uid: 'E5F6A7B8' });
+  expectEqual(
+    'granted vehicle tap grants',
+    (vehicleGranted.json.data as { access_result?: string } | undefined)?.access_result,
+    'granted'
+  );
+  const vehiclePerson = (vehicleGranted.json.data as { person?: { full_name?: string; plate_number?: string } } | undefined)
+    ?.person;
+  // Presence floor: without this, the field assertions below would compare
+  // undefined to undefined and pass even if the identity was never returned.
+  expectEqual('granted vehicle tap carries identity', !!vehiclePerson, true);
+  expectEqual('granted vehicle tap carries the plate number', vehiclePerson?.plate_number, 'NCST-1234');
+  expectEqual("granted vehicle tap carries the owner's name", vehiclePerson?.full_name, 'Juan Dela Cruz');
+
+  // A deactivated person must read differently from an unregistered stranger.
+  const deactivate = await request(superadmin, 'PATCH', `/persons/${personId}/status`, {
+    status: 'inactive',
+  });
+  expectEqual('person deactivated for the inactive-ID check', deactivate.status, 200);
+  const inactivePersonTap = await tap(gateKey(secondKey), { rfid_uid: 'A1B2C3D4' });
+  expectEqual(
+    'inactive person denied',
+    (inactivePersonTap.json.data as { access_result?: string } | undefined)?.access_result,
+    'denied'
+  );
+  expectEqual(
+    'inactive person denial reason',
+    (inactivePersonTap.json.data as { reason?: string } | undefined)?.reason,
+    'inactive_id'
+  );
+  const inactivePersonView = (inactivePersonTap.json.data as { person?: { full_name?: string } } | undefined)
+    ?.person;
+  expectEqual('inactive person denial carries identity', !!inactivePersonView, true);
+  expectEqual('inactive person denial carries the name', inactivePersonView?.full_name, 'Juan Dela Cruz');
+  // Restore before the attendance/exit-gate checks below, which expect Juan active.
+  const reactivate = await request(superadmin, 'PATCH', `/persons/${personId}/status`, {
+    status: 'active',
+  });
+  expectEqual('person reactivated after the inactive-ID check', reactivate.status, 200);
+
+  // Same distinction for a deactivated vehicle (Ana's car).
+  const vehiclesRes = await request(superadmin, 'GET', '/vehicles?limit=100');
+  const vehicles = (vehiclesRes.json.data ?? []) as { _id: string; rfid_uid: string }[];
+  const anaCar = vehicles.find((v) => v.rfid_uid === 'F6A7B8C9');
+  expectEqual('second seeded vehicle found', !!anaCar, true);
+  const anaCarId = anaCar?._id ?? '';
+
+  const deactivateVehicle = await request(superadmin, 'PATCH', `/vehicles/${anaCarId}/status`, {
+    status: 'inactive',
+  });
+  expectEqual('vehicle deactivated for the inactive-ID check', deactivateVehicle.status, 200);
+  const inactiveVehicleTap = await tap(gateKey(parkingKey), { rfid_uid: 'F6A7B8C9' });
+  expectEqual(
+    'inactive vehicle denial reason',
+    (inactiveVehicleTap.json.data as { reason?: string } | undefined)?.reason,
+    'inactive_id'
+  );
+  const inactiveVehicleView = (inactiveVehicleTap.json.data as { person?: { full_name?: string; plate_number?: string } } | undefined)
+    ?.person;
+  expectEqual('inactive vehicle denial carries identity', !!inactiveVehicleView, true);
+  expectEqual('inactive vehicle denial carries the plate number', inactiveVehicleView?.plate_number, 'NCST-5678');
+  const reactivateVehicle = await request(superadmin, 'PATCH', `/vehicles/${anaCarId}/status`, {
+    status: 'active',
+  });
+  expectEqual('vehicle reactivated after the inactive-ID check', reactivateVehicle.status, 200);
 
   // An exit gate must close the attendance day the entry gate opened.
   const sideGate = gates.find((g) => g.name === 'Side Gate');
@@ -433,6 +524,13 @@ async function main(): Promise<void> {
   });
   expectEqual('gate key may fetch a photo', byGate.status, 200);
   await request(superadmin, 'DELETE', `/persons/${personId}/photo`);
+
+  // Restore Juan's seeded placeholder photo (see the comment above the first
+  // cleanup block): this run deleted it twice while exercising DELETE, and
+  // without this the primary demo person is left faceless at the gate
+  // terminal until someone runs seed:test again.
+  const restored = await uploadPhoto(auth(registrar), personId, TINY_JPEG, 'restore.jpg', 'image/jpeg');
+  expectEqual('seeded photo restored for the primary demo person after the run', restored.status, 201);
 
   summary();
 }

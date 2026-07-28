@@ -26,7 +26,4 @@ export const personPhotoRepo = {
 
   deleteByPersonId: (personId: string) =>
     PersonPhotoModel.deleteOne({ person_id: new Types.ObjectId(personId) }),
-
-  countByPersonId: (personId: string) =>
-    PersonPhotoModel.countDocuments({ person_id: new Types.ObjectId(personId) }),
 };
