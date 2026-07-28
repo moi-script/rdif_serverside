@@ -6,10 +6,10 @@ import { GateModel } from '../modules/gates/gates.model';
 import { ROLES } from '../constants/roles';
 
 const GATES = [
-  { name: 'Main Entrance', type: 'person' as const, location: 'Front Building Gate A' },
-  { name: 'Side Gate', type: 'person' as const, location: 'South Wing Gate B' },
-  { name: 'Parking Entrance', type: 'vehicle' as const, location: 'Parking Lot Entry' },
-  { name: 'Parking Exit', type: 'vehicle' as const, location: 'Parking Lot Exit' },
+  { name: 'Main Entrance', type: 'person' as const, direction: 'entry' as const, location: 'Front Building Gate A' },
+  { name: 'Side Gate', type: 'person' as const, direction: 'exit' as const, location: 'South Wing Gate B' },
+  { name: 'Parking Entrance', type: 'vehicle' as const, direction: 'entry' as const, location: 'Parking Lot Entry' },
+  { name: 'Parking Exit', type: 'vehicle' as const, direction: 'exit' as const, location: 'Parking Lot Exit' },
 ];
 
 async function seed(): Promise<void> {
@@ -34,13 +34,10 @@ async function seed(): Promise<void> {
 
   // Gates (idempotent by name)
   for (const g of GATES) {
-    const exists = await GateModel.findOne({ name: g.name });
-    if (exists) {
-      console.log(`[seed] gate '${g.name}' already exists — skipping`);
-    } else {
-      await GateModel.create(g);
-      console.log(`[seed] created gate '${g.name}'`);
-    }
+    // Upsert rather than skip: `direction` is new and required, so gates
+    // created before this field existed must be backfilled here.
+    await GateModel.updateOne({ name: g.name }, { $set: g }, { upsert: true });
+    console.log(`[seed] gate '${g.name}' ready (${g.type}/${g.direction})`);
   }
 
   await disconnectDB();

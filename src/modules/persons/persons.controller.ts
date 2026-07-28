@@ -5,6 +5,7 @@ import { sendSuccess } from '../../utils/ApiResponse';
 import { ApiError } from '../../utils/ApiError';
 import { personService } from './persons.service';
 import { dashboardService } from '../dashboard/dashboard.service';
+import { personPhotoService } from './personPhotos.service';
 
 export const personController = {
   list: asyncHandler(async (req: Request, res: Response) => {
@@ -46,5 +47,32 @@ export const personController = {
   }),
   reassignRfid: asyncHandler(async (req: Request, res: Response) => {
     sendSuccess(res, await personService.reassignRfid(req.params.id, req.body.rfid_uid));
+  }),
+  uploadPhoto: asyncHandler(async (req: Request, res: Response) => {
+    sendSuccess(res, await personPhotoService.upload(req.params.id, req.file), 201);
+  }),
+  getPhoto: asyncHandler(async (req: Request, res: Response) => {
+    // A gate terminal authenticates by device key and has no req.user; it is
+    // allowed any photo.
+    const actor = req.gate
+      ? null
+      : req.user
+        ? { role: req.user.role, personId: req.user.personId }
+        : null;
+    const photo = await personPhotoService.get(req.params.id, actor);
+    const etag = `W/"${photo.updatedAt.getTime()}-${photo.byte_size}"`;
+    // A gate terminal re-requests the same faces all day.
+    if (req.headers['if-none-match'] === etag) {
+      res.status(304).end();
+      return;
+    }
+    res.setHeader('Content-Type', photo.mime);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    res.setHeader('ETag', etag);
+    res.status(200).send(photo.data);
+  }),
+  deletePhoto: asyncHandler(async (req: Request, res: Response) => {
+    sendSuccess(res, await personPhotoService.remove(req.params.id));
   }),
 };

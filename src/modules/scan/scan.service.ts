@@ -17,7 +17,7 @@ interface TapResult {
   access_result: 'granted' | 'denied';
   reason: string | null;
   scan_time: Date;
-  person?: { full_name: string; type: string; photo_url?: string };
+  person?: { full_name: string; type: string; photo_url?: string; plate_number?: string };
 }
 
 function dateKey(d: Date): string {
@@ -55,11 +55,15 @@ export const scanService = {
       if (person.status === 'active') {
         access_result = 'granted';
         reason = null;
-        personView = { full_name: person.full_name, type: person.type, photo_url: person.photo_url };
       } else {
         access_result = 'denied';
         reason = 'inactive_id';
       }
+      // Identity is shown for a grant AND for an inactive-ID denial, so a guard
+      // can tell "deactivated student" from "unregistered stranger". The
+      // wrong_gate_type check below clears this for the one denial that must
+      // not leak who the cardholder is.
+      personView = { full_name: person.full_name, type: person.type, photo_url: person.photo_url };
     } else {
       const vehicle = await vehicleRepo.findByRfid(input.rfid_uid);
       if (vehicle) {
@@ -72,7 +76,23 @@ export const scanService = {
           access_result = 'denied';
           reason = 'inactive_id';
         }
+        const owner = await personRepo.findById(String(vehicle.owner_person_id));
+        personView = {
+          full_name: owner?.full_name ?? 'Unknown owner',
+          type: 'vehicle',
+          plate_number: vehicle.plate_number,
+        };
       }
+    }
+
+    // A gate has a fixed type now, so a person card must not open the parking
+    // barrier and a vehicle tag must not register attendance at a walking gate.
+    // Gadgets (Subsystem B) are deliberately exempt when they are added: the
+    // check applies only to person and vehicle entities.
+    if (access_result === 'granted' && entity_type !== gate.type) {
+      access_result = 'denied';
+      reason = 'wrong_gate_type';
+      personView = undefined;
     }
 
     await scanRepo.createLog({

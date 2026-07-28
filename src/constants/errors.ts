@@ -6,6 +6,7 @@ export const ERROR_CODES = {
   FORBIDDEN: { status: 403, message: 'Insufficient permissions' },
   NOT_FOUND: { status: 404, message: 'Resource not found' },
   VALIDATION_ERROR: { status: 422, message: 'Request validation failed' },
+  PAYLOAD_TOO_LARGE: { status: 413, message: 'Uploaded file is too large' },
   DUPLICATE_RFID: { status: 409, message: 'RFID UID already registered' },
   DUPLICATE_ID: { status: 409, message: 'ID number already registered' },
   DUPLICATE_PLATE: { status: 409, message: 'Plate number already registered' },
