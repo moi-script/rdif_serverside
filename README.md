@@ -70,6 +70,42 @@ linked to a `User` login whose **username is the student/employee number**.
 
 > Demo credentials for local testing only.
 
+### Gate terminals
+
+Each of the four gates has a fixed `type` (person/vehicle) and `direction`
+(entry/exit). A terminal authenticates with a per-gate device key sent as
+`X-Gate-Key`; the server derives the gate and direction from the key, so a
+terminal posts only `{ rfid_uid }`.
+
+- `POST /gates/:id/key` (superadmin) mints a key and revokes that gate's
+  previous ones. The plaintext is returned once and is not recoverable.
+- `npm run seed:test` prints one key per gate for local development.
+- `npm run verify:gates` asserts the photo pipeline and gate behavior. It mints
+  its own keys, so terminals provisioned beforehand need re-provisioning after.
+
+### Photos
+
+`POST /persons/:id/photo` (registrar/superadmin, multipart field `photo`, 1MB
+cap) stores bytes in the `personphotos` collection and sets `photo_url` to
+`/persons/<id>/photo`. Uploads are classified by magic bytes, not by the
+declared Content-Type. `GET /persons/:id/photo` accepts a user JWT or a gate
+key.
+
+### Attendance date bucketing (local time, not UTC)
+
+`scanService.dateKey()` buckets attendance by the **server's local calendar
+date** (`Date#getFullYear/getMonth/getDate`), and `isLate()` compares against
+`LATE_CUTOFF_TIME` in local hours via `Date#setHours`. Neither uses UTC.
+
+Any consumer that computes "today" in UTC — for example
+`new Date().toISOString().slice(0, 10)` — will compute a different calendar
+day than the server for part of every day in any timezone that isn't UTC+0,
+and will silently query the wrong attendance bucket. This is not a corner
+case: it caused a real intermittent test failure during development. When
+building a client, script, or test against `/attendance`, derive the date
+key the same way the server does (local `Date` components), never via
+`toISOString()`.
+
 ## Data model
 
 - **Person** — a student/staff/employee profile with an `rfid_uid` and `id_number`.

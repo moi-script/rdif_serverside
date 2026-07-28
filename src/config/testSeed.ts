@@ -1,4 +1,5 @@
 import bcrypt from 'bcrypt';
+import { randomBytes } from 'crypto';
 import { Types } from 'mongoose';
 import { connectDB, disconnectDB } from './db';
 import { UserModel } from '../modules/users/users.model';
@@ -7,6 +8,8 @@ import { GateModel } from '../modules/gates/gates.model';
 import { VehicleModel } from '../modules/vehicles/vehicles.model';
 import { AttendanceModel } from '../modules/attendance/attendance.model';
 import { ScanLogModel } from '../modules/scan/scan.model';
+import { PersonPhotoModel } from '../modules/persons/personPhotos.model';
+import { GateKeyModel } from '../modules/gates/gateKeys.model';
 import { ROLES } from '../constants/roles';
 
 /**
@@ -82,6 +85,14 @@ const GATES = [
 
 // Old-style usernames from the first seed run — remove so logins are clean.
 const LEGACY_STUDENT_USERNAMES = ['student1', 'student2', 'student3'];
+
+/** A 1x1 JPEG. Placeholder pixels, not a face — enough for the terminal to render. */
+const PLACEHOLDER_JPEG = Buffer.from(
+  '/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0a' +
+    'HBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAA' +
+    'AAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==',
+  'base64'
+);
 
 function ymd(d: Date): string {
   const y = d.getFullYear();
@@ -310,6 +321,53 @@ async function seedDemoActivity(persons: IPerson[]): Promise<void> {
   );
 }
 
+async function seedPhotosAndKeys(persons: IPerson[], adminId: Types.ObjectId): Promise<void> {
+  // Photos for two people, so the gate terminal has faces to show.
+  for (const idNumber of ['2025-0001', 'EMP-1001']) {
+    const person = persons.find((p) => p.id_number === idNumber);
+    if (!person) continue;
+    const existing = await PersonPhotoModel.findOne({ person_id: person._id });
+    if (existing) {
+      console.log(`[test-seed] photo for '${idNumber}' already exists — skipping`);
+      continue;
+    }
+    await PersonPhotoModel.create({
+      person_id: person._id,
+      data: PLACEHOLDER_JPEG,
+      mime: 'image/jpeg',
+      byte_size: PLACEHOLDER_JPEG.length,
+    });
+    await PersonModel.updateOne(
+      { _id: person._id },
+      { $set: { photo_url: `/persons/${person._id}/photo` } }
+    );
+    console.log(`[test-seed] created placeholder photo for '${idNumber}'`);
+  }
+
+  // One device key per gate, so a terminal can be provisioned without the UI.
+  const gates = await GateModel.find();
+  for (const gate of gates) {
+    const active = await GateKeyModel.findOne({ gate_id: gate._id, is_active: true });
+    if (active) {
+      console.log(`[test-seed] gate '${gate.name}' already has an active key — skipping`);
+      continue;
+    }
+    const prefix = randomBytes(4).toString('hex');
+    const secret = randomBytes(16).toString('hex');
+    const key = `gk_live_${prefix}${secret}`;
+    await GateKeyModel.create({
+      gate_id: gate._id,
+      key_hash: await bcrypt.hash(key, 12),
+      key_prefix: prefix,
+      created_by: adminId,
+    });
+    // Printed once, and never in production — the plaintext is unrecoverable.
+    if (process.env.NODE_ENV !== 'production') {
+      console.log(`[test-seed] gate '${gate.name}' (${gate.type}/${gate.direction}) key: ${key}`);
+    }
+  }
+}
+
 async function seedTest(): Promise<void> {
   await connectDB();
 
@@ -365,6 +423,10 @@ async function seedTest(): Promise<void> {
 
   // ---- Demo activity so the dashboards aren't empty ----
   await seedDemoActivity(persons);
+
+  const adminDoc = await UserModel.findOne({ username: HARDCODED_ADMIN.username });
+  if (!adminDoc) throw new Error('[test-seed] superadmin missing after seeding');
+  await seedPhotosAndKeys(persons, adminDoc._id);
 
   await disconnectDB();
   console.log('[test-seed] done');
