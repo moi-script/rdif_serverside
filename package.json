@@ -10,6 +10,7 @@
     "seed:test": "ts-node src/config/testSeed.ts",
     "verify:roles": "ts-node src/config/verifyRoles.ts",
     "verify:gates": "ts-node src/config/verifyGates.ts",
+    "verify:signatures": "ts-node src/config/verifySignatures.ts",
     "lint": "eslint src --ext .ts"
   },
   "dependencies": {
