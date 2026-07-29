@@ -43,6 +43,7 @@ node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
 | `ALLOWED_ORIGINS` | Comma-separated CORS origins (e.g. `http://localhost:5173`) |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | Seed admin credentials |
 | `LOGIN_RATE_LIMIT_MAX` | Max `/auth/login` requests per 15 min (default `10`). `npm run verify:roles` makes 6 login calls per run, so running it twice in a row needs at least `20`. |
+| `OCCUPANCY_RESET_TIME` | Nightly cutoff (`HH:MM`, default `23:00`) after which a card still marked inside is treated as outside. Prevents a missed exit tap from locking someone out the next morning. |
 
 ## Scripts
 
@@ -52,6 +53,8 @@ node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
 - `npm run seed` — seed admin + gates (idempotent)
 - `npm run seed:test` — seed hardcoded test accounts for the testing phase (idempotent)
 - `npm run lint` — eslint
+- `npm run verify:passback` — assert anti-passback behaviour (needs `dev` + `seed:test`)
+- `npm run rebuild:occupancy` — reconcile occupancy state from `scan_logs`
 
 ### Troubleshooting
 
@@ -60,8 +63,16 @@ node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
   detection atomic, and `server.ts` now refuses to start until it exists. If
   the `occupancies` collection has duplicate `{entity_type, entity_id}` rows
   from a run that predates the index, the build fails permanently against
-  that duplicate data. Drop the collection and let it rebuild (or run the
-  rebuild script once one exists in a later task).
+  that duplicate data. Drop the collection and run `npm run rebuild:occupancy`
+  to repopulate it cleanly from `scan_logs`.
+- **Occupancy state looks wrong (a card shows `inside` when it shouldn't, or
+  vice versa) after a restore, a manual edit, or a bug.** `scan_logs` is the
+  source of truth; occupancy is a read-optimised second copy that can drift
+  from it. Run `npm run rebuild:occupancy` to wipe and replay occupancy from
+  the scan log since the last nightly reset boundary. The script itself waits
+  for the unique `(entity_type, entity_id)` index to finish building before
+  writing, for the same reason described above — don't skip that wait when
+  editing the script.
 
 ## Test accounts (`npm run seed:test`)
 
