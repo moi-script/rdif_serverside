@@ -11,6 +11,7 @@
     "verify:roles": "ts-node src/config/verifyRoles.ts",
     "verify:gates": "ts-node src/config/verifyGates.ts",
     "verify:signatures": "ts-node src/config/verifySignatures.ts",
+    "verify:passback": "ts-node src/config/verifyPassback.ts",
     "lint": "eslint src --ext .ts"
   },
   "dependencies": {
