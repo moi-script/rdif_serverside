@@ -1,9 +1,16 @@
 import { createApp } from './app';
 import { connectDB, disconnectDB } from './config/db';
 import { env } from './config/env';
+import { OccupancyModel } from './modules/occupancy/occupancy.model';
 
 async function bootstrap(): Promise<void> {
   await connectDB();
+  // Anti-passback detection IS the unique index on occupancy: a duplicate-key
+  // error is how a repeat entry is caught. Mongoose builds indexes in the
+  // background, so serving taps before the build finishes would silently admit
+  // passbacks — and any duplicates created in that window make the build fail
+  // permanently. Refuse to serve until it exists.
+  await OccupancyModel.init();
   const app = createApp();
   const server = app.listen(env.PORT, () => {
     console.log(`[server] listening on port ${env.PORT} (${env.NODE_ENV})`);
