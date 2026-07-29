@@ -64,19 +64,38 @@ export const occupancyRepo = {
     }
   },
 
-  /** Exit never fails. A miss means they were not inside, which is an anomaly, not a denial. */
+  /**
+   * Exit never fails. A miss means they were not inside, which is an anomaly,
+   * not a denial.
+   *
+   * Applies the same staleness rule as `enter`/`listInside`: a row stranded
+   * `inside` from before `boundary` no longer counts as a real entry. Without
+   * this, a card that entered before the nightly reset and never tapped out
+   * would match here on its next exit tap and silently report `released`,
+   * even though there was no entry within the current occupancy window — the
+   * correct signal is `exit_without_entry`, so the anomaly report can see it.
+   */
   async release(
     entity_type: EntityType,
     entity_id: Types.ObjectId,
-    gate_id: Types.ObjectId
+    gate_id: Types.ObjectId,
+    boundary: Date
   ): Promise<ExitResult> {
     const doc = await OccupancyModel.findOneAndUpdate(
-      { entity_type, entity_id, state: 'inside' },
+      { entity_type, entity_id, state: 'inside', since: { $gte: boundary } },
       { $set: { state: 'outside', since: new Date(), last_gate_id: gate_id } }
     );
     return doc ? 'released' : 'exit_without_entry';
   },
 
+  /**
+   * Deliberately permissive: matches on `state: 'inside'` alone, with no
+   * staleness check. This is intentional, not an oversight — a superadmin
+   * must always be able to clear a stuck row through this API, even a stale
+   * one, so gating this on freshness (like `release`/`enter`/`listInside`)
+   * would leave an admin unable to fix a stale row at all. Do not
+   * "harmonise" this with `release`'s boundary check.
+   */
   clearById(id: string, clearedBy: Types.ObjectId): Promise<IOccupancy | null> {
     return OccupancyModel.findOneAndUpdate(
       { _id: id, state: 'inside' },

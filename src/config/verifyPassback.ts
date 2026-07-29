@@ -188,7 +188,7 @@ async function main(): Promise<void> {
   );
   expectEqual(
     'exit releases the card',
-    await occupancyRepo.release('person', personId, gateId),
+    await occupancyRepo.release('person', personId, gateId, boundary),
     'released'
   );
   expectEqual(
@@ -198,12 +198,12 @@ async function main(): Promise<void> {
   );
   expectEqual(
     'exit after a re-entry releases again',
-    await occupancyRepo.release('person', personId, gateId),
+    await occupancyRepo.release('person', personId, gateId, boundary),
     'released'
   );
   expectEqual(
     'exit while already outside is flagged',
-    await occupancyRepo.release('person', personId, gateId),
+    await occupancyRepo.release('person', personId, gateId, boundary),
     'exit_without_entry'
   );
 
@@ -242,7 +242,7 @@ async function main(): Promise<void> {
   for (let round = 1; round <= 5; round++) {
     const racer = new Types.ObjectId();
     await occupancyRepo.enter('person', racer, gateId, boundary);
-    await occupancyRepo.release('person', racer, gateId); // now state: 'outside'
+    await occupancyRepo.release('person', racer, gateId, boundary); // now state: 'outside'
     const results = await Promise.all(
       Array.from({ length: 8 }, () => occupancyRepo.enter('person', racer, gateId, boundary))
     );
@@ -314,6 +314,37 @@ async function main(): Promise<void> {
   const orphanExit = await tap(superadmin, juanUid, personExit, 'exit');
   expectEqual('exit with no entry is never blocked', orphanExit.access_result, 'granted');
   expectEqual('exit with no entry is flagged', orphanExit.reason, 'exit_without_entry');
+
+  // release() must apply the same staleness rule as enter()/listInside(),
+  // otherwise a card stranded 'inside' from before the nightly boundary would
+  // silently report 'released' on its next exit tap, hiding a genuine
+  // exit-without-entry from the anomaly report. Pin the exact scenario: enter,
+  // backdate `since` to before the boundary (same technique as the stale-doc
+  // concurrency block above), then tap an exit.
+  const staleEntry = await tap(superadmin, juanUid, personEntry, 'entry');
+  expectEqual('stale-exit setup: entry granted', staleEntry.access_result, 'granted');
+  const staleBoundary = lastResetBoundary(new Date());
+  await OccupancyModel.updateOne(
+    { entity_id: juan._id },
+    { $set: { since: new Date(staleBoundary.getTime() - 60_000) } }
+  );
+  const staleExit = await tap(superadmin, juanUid, personExit, 'exit');
+  expectEqual('exit against a stale inside row is never blocked', staleExit.access_result, 'granted');
+  expectEqual(
+    'exit against a stale inside row is flagged, not silently released',
+    staleExit.reason,
+    'exit_without_entry'
+  );
+  await OccupancyModel.deleteMany({ entity_id: juan._id });
+
+  // And the ordinary case must still behave: a fresh entry followed by an
+  // exit is a real release with no anomaly reason.
+  const freshEntry = await tap(superadmin, juanUid, personEntry, 'entry');
+  expectEqual('fresh-exit setup: entry granted', freshEntry.access_result, 'granted');
+  const freshExit = await tap(superadmin, juanUid, personExit, 'exit');
+  expectEqual('exit against a fresh inside row is granted', freshExit.access_result, 'granted');
+  expectEqual('exit against a fresh inside row has no reason', freshExit.reason, null);
+  await OccupancyModel.deleteMany({ entity_id: juan._id });
 
   // A denied tap must not move anyone's state. Tapping a person card at a
   // VEHICLE gate is denied for wrong_gate_type before occupancy is consulted;

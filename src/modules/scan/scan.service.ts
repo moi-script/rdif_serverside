@@ -105,13 +105,11 @@ export const scanService = {
       // resolved it from this exact string, so reuse it instead of
       // reconstructing a third ObjectId from the same source string.
       const gateOid = gate._id;
+      // Shared by both branches so entry and exit agree on exactly the same
+      // reset boundary for this tap, rather than each computing it separately.
+      const boundary = lastResetBoundary(scan_time);
       if (input.direction === 'entry') {
-        const outcome = await occupancyRepo.enter(
-          entity_type,
-          entity_id,
-          gateOid,
-          lastResetBoundary(scan_time)
-        );
+        const outcome = await occupancyRepo.enter(entity_type, entity_id, gateOid, boundary);
         if (outcome === 'already_inside') {
           access_result = 'denied';
           reason = 'already_inside';
@@ -125,7 +123,7 @@ export const scanService = {
         // boundary clears. Entry deliberately still fails closed.
         let outcome: 'released' | 'exit_without_entry';
         try {
-          outcome = await occupancyRepo.release(entity_type, entity_id, gateOid);
+          outcome = await occupancyRepo.release(entity_type, entity_id, gateOid, boundary);
         } catch (err) {
           console.error(
             `[scan] occupancy unavailable on exit for ${entity_type} ${entity_id.toString()}; ` +
