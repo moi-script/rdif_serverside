@@ -24,10 +24,23 @@ export const occupancyService = {
   async clear(id: string, actorUserId: string) {
     if (!Types.ObjectId.isValid(id)) throw new ApiError('NOT_FOUND', 'Occupancy record not found');
 
-    const doc = await occupancyRepo.clearById(id, new Types.ObjectId(actorUserId));
+    const actorId = new Types.ObjectId(actorUserId);
+    const doc = await occupancyRepo.clearById(id, actorId);
     if (!doc) throw new ApiError('NOT_FOUND', 'No one is currently inside under that record');
 
-    const rfid_uid = await resolveRfid(doc.entity_type, doc.entity_id);
+    // The state change above already committed — the person is `outside` now.
+    // A lookup failure past this point must never cost the audit row, so it is
+    // swallowed here and falls back to 'MANUAL' rather than propagating and
+    // skipping the ScanLogModel.create below. (The create() itself is left to
+    // propagate: if IT fails, the override truly has no record, which is a
+    // real loss, but not one this function can paper over.)
+    let rfid_uid: string;
+    try {
+      rfid_uid = await resolveRfid(doc.entity_type, doc.entity_id);
+    } catch {
+      rfid_uid = 'MANUAL';
+    }
+
     await ScanLogModel.create({
       rfid_uid,
       entity_type: doc.entity_type,
@@ -37,8 +50,12 @@ export const occupancyService = {
       access_result: 'granted',
       reason: 'manual_override',
       scan_time: new Date(),
+      actor_user_id: actorId,
     });
 
+    // Deliberately NOT an attendance time_out: unlike a real exit tap, an
+    // override does not claim the person actually left, so an overridden
+    // person's attendance row keeps showing no time_out.
     return { cleared: true };
   },
 };

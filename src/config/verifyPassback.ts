@@ -14,6 +14,8 @@ import { occupancyRepo } from '../modules/occupancy/occupancy.repository';
 import { lastResetBoundary } from '../utils/occupancyWindow';
 import { PersonModel } from '../modules/persons/persons.model';
 import { VehicleModel } from '../modules/vehicles/vehicles.model';
+import { UserModel } from '../modules/users/users.model';
+import { ScanLogModel } from '../modules/scan/scan.model';
 
 const failures: string[] = [];
 let checks = 0;
@@ -348,8 +350,9 @@ async function main(): Promise<void> {
 
   console.log('\n== presence roster and override ==');
   const registrar = await login('testregistrar', 'Registrar@123');
+  const superadminUser = await UserModel.findOne({ username: 'testadmin' }).lean();
+  if (!superadminUser) throw new Error('run `npm run seed:test` first — testadmin is missing');
 
-  await OccupancyModel.deleteMany({ entity_id: juan._id });
   await tap(superadmin, juanUid, personEntry, 'entry');
 
   const roster = await request(superadmin, 'GET', '/occupancy');
@@ -378,6 +381,22 @@ async function main(): Promise<void> {
 
   const cleared = await request(superadmin, 'POST', `/occupancy/${juanRow?._id}/clear`, {});
   expectEqual('superadmin may clear state', cleared.status, 200);
+
+  // The override must leave a permanent, attributable audit trail — this is
+  // the entire point of the feature, not incidental bookkeeping.
+  const overrideLog = await ScanLogModel.findOne({
+    entity_id: juan._id,
+    reason: 'manual_override',
+  })
+    .sort({ scan_time: -1 })
+    .lean();
+  expectEqual('the override wrote an audit log row', !!overrideLog, true);
+  expectEqual('the audit row carries the card UID', overrideLog?.rfid_uid, juanUid);
+  expectEqual(
+    'the audit row attributes the override to the acting superadmin',
+    overrideLog?.actor_user_id?.toString(),
+    superadminUser._id.toString()
+  );
 
   // Immediately again, with nothing tapped in between: the row is genuinely
   // outside now, so there is nothing to clear and the client must not retry.

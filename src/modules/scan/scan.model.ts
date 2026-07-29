@@ -10,6 +10,7 @@ export interface IScanLog extends Document {
   access_result: 'granted' | 'denied';
   reason: string | null;
   scan_time: Date;
+  actor_user_id: Types.ObjectId | null;
 }
 
 const TWO_YEARS_SECONDS = 60 * 60 * 24 * 365 * 2;
@@ -24,6 +25,11 @@ const scanLogSchema = new Schema<IScanLog>({
   access_result: { type: String, enum: ['granted', 'denied'], required: true },
   reason: { type: String, default: null },
   scan_time: { type: Date, required: true, index: { expireAfterSeconds: TWO_YEARS_SECONDS } },
+  // Null for ordinary gate taps — a card tap has no operator. Set only when a
+  // human performed the action, e.g. a superadmin clearing occupancy state.
+  // This is what makes an override permanently attributable: occupancy's
+  // cleared_by is wiped by the person's very next tap.
+  actor_user_id: { type: Schema.Types.ObjectId, ref: 'User', default: null },
 });
 
 scanLogSchema.index({ entity_type: 1, entity_id: 1 });
