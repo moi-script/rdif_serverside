@@ -5,6 +5,10 @@
  * Requires: `npm run dev` running, and `npm run seed:test` already applied.
  * Run with: npm run verify:passback
  */
+import mongoose, { Types } from 'mongoose';
+import { connectDB } from './db';
+import { OccupancyModel } from '../modules/occupancy/occupancy.model';
+import { occupancyRepo } from '../modules/occupancy/occupancy.repository';
 import { lastResetBoundary } from '../utils/occupancyWindow';
 
 const failures: string[] = [];
@@ -89,6 +93,83 @@ async function main(): Promise<void> {
     lastResetBoundary(at(15, 7, 5), '23:00').getTime()
   );
 
+  console.log('\n== occupancy repository ==');
+  await connectDB();
+  // Mongoose builds indexes in the background after the model is first used.
+  // Without waiting for it here, the concurrency round below can fire its
+  // duplicate writes before the unique index exists, which makes MongoDB
+  // refuse to build it against the resulting duplicate keys — silently
+  // disabling passback detection for the rest of the run. Waiting on init()
+  // guarantees the index is live before any test traffic hits the collection.
+  await OccupancyModel.init();
+
+  const personId = new Types.ObjectId();
+  const gateId = new Types.ObjectId();
+  const boundary = lastResetBoundary(new Date());
+  await OccupancyModel.deleteMany({ entity_id: personId });
+
+  expectEqual(
+    'first entry is admitted',
+    await occupancyRepo.enter('person', personId, gateId, boundary),
+    'admitted'
+  );
+  expectEqual(
+    'second entry with no exit is refused',
+    await occupancyRepo.enter('person', personId, gateId, boundary),
+    'already_inside'
+  );
+  expectEqual(
+    'exit releases the card',
+    await occupancyRepo.release('person', personId, gateId),
+    'released'
+  );
+  expectEqual(
+    'entry after a real exit is admitted again',
+    await occupancyRepo.enter('person', personId, gateId, boundary),
+    'admitted'
+  );
+  expectEqual(
+    'a second exit with nothing to release is flagged',
+    await occupancyRepo.release('person', personId, gateId),
+    'released'
+  );
+  expectEqual(
+    'exit while already outside is flagged',
+    await occupancyRepo.release('person', personId, gateId),
+    'exit_without_entry'
+  );
+
+  // Lazy expiry: a document stranded inside from BEFORE the boundary must be
+  // treated as outside, so a missed exit tap is not a next-morning lockout.
+  await occupancyRepo.enter('person', personId, gateId, boundary);
+  await OccupancyModel.updateOne(
+    { entity_id: personId },
+    { $set: { since: new Date(boundary.getTime() - 60_000) } }
+  );
+  expectEqual(
+    'state stranded before the boundary is treated as expired',
+    await occupancyRepo.enter('person', personId, gateId, boundary),
+    'admitted'
+  );
+
+  // The whole point of the design. Eight simultaneous entries on one card must
+  // produce exactly ONE grant. A read-then-write implementation passes every
+  // sequential check above and fails this one.
+  for (let round = 1; round <= 10; round++) {
+    const racer = new Types.ObjectId();
+    const results = await Promise.all(
+      Array.from({ length: 8 }, () => occupancyRepo.enter('person', racer, gateId, boundary))
+    );
+    expectEqual(
+      `round ${round}: exactly one grant under 8 concurrent entries`,
+      results.filter((r) => r === 'admitted').length,
+      1
+    );
+    await OccupancyModel.deleteMany({ entity_id: racer });
+  }
+
+  await OccupancyModel.deleteMany({ entity_id: personId });
+  await mongoose.disconnect();
   summary();
 }
 
