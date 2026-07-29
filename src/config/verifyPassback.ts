@@ -82,6 +82,13 @@ async function main(): Promise<void> {
     at(15, 0, 0).getTime()
   );
 
+  // The default-parameter path is contract for Tasks 4, 5 and 7, so exercise it.
+  expectEqual(
+    'omitting resetTime uses the configured default',
+    lastResetBoundary(at(15, 7, 5)).getTime(),
+    lastResetBoundary(at(15, 7, 5), '23:00').getTime()
+  );
+
   summary();
 }
 

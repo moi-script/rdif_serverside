@@ -21,7 +21,10 @@ const envSchema = z.object({
   SCAN_RATE_LIMIT_MAX: z.coerce.number().default(60),
   COOKIE_SECRET: z.string().default('cookie_secret'),
   LATE_CUTOFF_TIME: z.string().default('08:00'),
-  OCCUPANCY_RESET_TIME: z.string().default('23:00'),
+  OCCUPANCY_RESET_TIME: z
+    .string()
+    .regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'OCCUPANCY_RESET_TIME must be HH:MM (24-hour)')
+    .default('23:00'),
 });
 
 const parsed = envSchema.safeParse(process.env);
