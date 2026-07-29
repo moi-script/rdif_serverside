@@ -101,7 +101,10 @@ export const scanService = {
     // card can never move anyone's state — including a stranger repeatedly
     // tapping a stolen inactive card.
     if (access_result === 'granted' && entity_id) {
-      const gateOid = new Types.ObjectId(input.gate_id);
+      // gate._id is the same ObjectId as input.gate_id: gateRepo.findById above
+      // resolved it from this exact string, so reuse it instead of
+      // reconstructing a third ObjectId from the same source string.
+      const gateOid = gate._id;
       if (input.direction === 'entry') {
         const outcome = await occupancyRepo.enter(
           entity_type,
@@ -116,10 +119,18 @@ export const scanService = {
           // system thinks is inside in order to resolve it.
         }
       } else {
-        const outcome = await occupancyRepo.release(entity_type, entity_id, gateOid);
+        // Egress is never blocked, including when occupancy itself is
+        // unavailable: a stuck exit gate is a physical safety problem, while a
+        // failed release only leaves a stale roster row that the nightly
+        // boundary clears. Entry deliberately still fails closed.
+        let outcome: 'released' | 'exit_without_entry';
+        try {
+          outcome = await occupancyRepo.release(entity_type, entity_id, gateOid);
+        } catch {
+          reason = 'occupancy_unavailable';
+          outcome = 'released';
+        }
         if (outcome === 'exit_without_entry') {
-          // Granted anyway — egress is never blocked. The reason rides along on
-          // a granted row so the anomaly report can find it.
           reason = 'exit_without_entry';
         }
       }
@@ -129,7 +140,7 @@ export const scanService = {
       rfid_uid: input.rfid_uid,
       entity_type,
       entity_id,
-      gate_id: new Types.ObjectId(input.gate_id),
+      gate_id: gate._id,
       direction: input.direction,
       access_result,
       reason,

@@ -307,7 +307,10 @@ async function main(): Promise<void> {
   console.log('\n== device key minting ==');
   const mainGate = gates.find((g) => g.name === 'Main Entrance');
   const parkingIn = gates.find((g) => g.name === 'Parking Entrance');
-  if (!mainGate || !parkingIn) throw new Error('expected gates missing — run npm run seed:test');
+  const parkingOut = gates.find((g) => g.name === 'Parking Exit');
+  if (!mainGate || !parkingIn || !parkingOut) {
+    throw new Error('expected gates missing — run npm run seed:test');
+  }
 
   const registrarMint = await request(registrar, 'POST', `/gates/${mainGate._id}/key`);
   expectEqual('registrar cannot mint a key', registrarMint.status, 403);
@@ -320,6 +323,10 @@ async function main(): Promise<void> {
   const parkingMint = await request(superadmin, 'POST', `/gates/${parkingIn._id}/key`);
   const parkingKey = (parkingMint.json.data as { key?: string } | undefined)?.key;
   expectEqual('parking key minted', typeof parkingKey, 'string');
+
+  const parkingOutMint = await request(superadmin, 'POST', `/gates/${parkingOut._id}/key`);
+  const parkingOutKey = (parkingOutMint.json.data as { key?: string } | undefined)?.key;
+  expectEqual('parking exit key minted', typeof parkingOutKey, 'string');
 
   // Minting again must revoke the first key.
   const secondMint = await request(superadmin, 'POST', `/gates/${mainGate._id}/key`);
@@ -475,6 +482,18 @@ async function main(): Promise<void> {
     status: 'active',
   });
   expectEqual('vehicle reactivated after the inactive-ID check', reactivateVehicle.status, 200);
+
+  // The earlier grant left Juan's motorcycle occupancy-'inside'. Release it
+  // here so the harness ends with the vehicle 'outside' and is safe to run
+  // again in the same reset window — otherwise the next run's "granted
+  // vehicle tap grants" check would be denied already_inside.
+  if (!parkingOutKey) throw new Error('parking exit key minting did not return a key');
+  const vehicleExitTap = await tap(gateKey(parkingOutKey), { rfid_uid: 'E5F6A7B8' });
+  expectEqual(
+    'vehicle exit releases occupancy',
+    (vehicleExitTap.json.data as { access_result?: string } | undefined)?.access_result,
+    'granted'
+  );
 
   // An exit gate must close the attendance day the entry gate opened.
   const sideGate = gates.find((g) => g.name === 'Side Gate');

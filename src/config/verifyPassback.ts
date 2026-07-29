@@ -2,8 +2,9 @@
  * Asserts the anti-passback behaviour in
  * docs/superpowers/specs/2026-07-29-anti-passback-design.md.
  *
- * Requires: MongoDB reachable at `MONGODB_URI`. (`npm run seed:test` is only
- * needed for the HTTP-based checks a later task appends to this file.)
+ * Requires: MongoDB reachable at `MONGODB_URI`, `npm run dev` running (the
+ * HTTP-based checks below tap through the real server), and `npm run
+ * seed:test` already applied.
  * Run with: npm run verify:passback
  */
 import mongoose, { Types } from 'mongoose';
@@ -82,6 +83,7 @@ async function request(
 interface TapData {
   access_result: 'granted' | 'denied';
   reason: string | null;
+  person?: { full_name: string };
 }
 
 /** Taps as a superadmin, which names the gate in the body (see scan.routes.ts). */
@@ -292,6 +294,11 @@ async function main(): Promise<void> {
   const second = await tap(superadmin, juanUid, personEntry, 'entry');
   expectEqual('repeat entry denied', second.access_result, 'denied');
   expectEqual('repeat entry names the passback', second.reason, 'already_inside');
+  // The subtle half of the personView asymmetry: unlike wrong_gate_type, an
+  // already_inside denial must KEEP the cardholder's identity so a guard can
+  // see who the system thinks is inside. A future "harmonise the denial
+  // branches" refactor that cleared it here would go green without this.
+  expectEqual('already_inside denial keeps identity', second.person?.full_name, 'Juan Dela Cruz');
 
   const out = await tap(superadmin, juanUid, personExit, 'exit');
   expectEqual('exit granted', out.access_result, 'granted');
