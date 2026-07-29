@@ -2,7 +2,8 @@
  * Asserts the anti-passback behaviour in
  * docs/superpowers/specs/2026-07-29-anti-passback-design.md.
  *
- * Requires: `npm run dev` running, and `npm run seed:test` already applied.
+ * Requires: MongoDB reachable at `MONGODB_URI`. (`npm run seed:test` is only
+ * needed for the HTTP-based checks a later task appends to this file.)
  * Run with: npm run verify:passback
  */
 import mongoose, { Types } from 'mongoose';
@@ -129,7 +130,7 @@ async function main(): Promise<void> {
     'admitted'
   );
   expectEqual(
-    'a second exit with nothing to release is flagged',
+    'exit after a re-entry releases again',
     await occupancyRepo.release('person', personId, gateId),
     'released'
   );
@@ -162,6 +163,44 @@ async function main(): Promise<void> {
     );
     expectEqual(
       `round ${round}: exactly one grant under 8 concurrent entries`,
+      results.filter((r) => r === 'admitted').length,
+      1
+    );
+    await OccupancyModel.deleteMany({ entity_id: racer });
+  }
+
+  // Race against an EXISTING outside document, not a fresh insert. This path
+  // resolves through the update predicate rather than the unique index, so it
+  // needs its own proof.
+  for (let round = 1; round <= 5; round++) {
+    const racer = new Types.ObjectId();
+    await occupancyRepo.enter('person', racer, gateId, boundary);
+    await occupancyRepo.release('person', racer, gateId); // now state: 'outside'
+    const results = await Promise.all(
+      Array.from({ length: 8 }, () => occupancyRepo.enter('person', racer, gateId, boundary))
+    );
+    expectEqual(
+      `outside-doc round ${round}: exactly one grant under 8 concurrent entries`,
+      results.filter((r) => r === 'admitted').length,
+      1
+    );
+    await OccupancyModel.deleteMany({ entity_id: racer });
+  }
+
+  // Race against a STALE inside document. Exactly one caller should heal it and
+  // be admitted; the other seven must be refused.
+  for (let round = 1; round <= 5; round++) {
+    const racer = new Types.ObjectId();
+    await occupancyRepo.enter('person', racer, gateId, boundary);
+    await OccupancyModel.updateOne(
+      { entity_id: racer },
+      { $set: { since: new Date(boundary.getTime() - 60_000) } }
+    );
+    const results = await Promise.all(
+      Array.from({ length: 8 }, () => occupancyRepo.enter('person', racer, gateId, boundary))
+    );
+    expectEqual(
+      `stale-doc round ${round}: exactly one grant under 8 concurrent entries`,
       results.filter((r) => r === 'admitted').length,
       1
     );

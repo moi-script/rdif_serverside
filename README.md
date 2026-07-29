@@ -53,6 +53,16 @@ node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
 - `npm run seed:test` — seed hardcoded test accounts for the testing phase (idempotent)
 - `npm run lint` — eslint
 
+### Troubleshooting
+
+- **Server fails to start with an index error on `occupancies`.** The
+  `entity_type_1_entity_id_1` unique index is what makes anti-passback
+  detection atomic, and `server.ts` now refuses to start until it exists. If
+  the `occupancies` collection has duplicate `{entity_type, entity_id}` rows
+  from a run that predates the index, the build fails permanently against
+  that duplicate data. Drop the collection and let it rebuild (or run the
+  rebuild script once one exists in a later task).
+
 ## Test accounts (`npm run seed:test`)
 
 For the testing phase, `seed:test` inserts a hardcoded superadmin, a registrar, three

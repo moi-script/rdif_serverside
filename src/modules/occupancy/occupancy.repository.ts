@@ -7,6 +7,16 @@ export type EntityType = 'person' | 'vehicle';
 export type EnterResult = 'admitted' | 'already_inside';
 export type ExitResult = 'released' | 'exit_without_entry';
 
+/** The projected shape of one `listInside` row, after the person/vehicle/gate lookups. */
+export interface OccupancyListRow {
+  _id: Types.ObjectId;
+  entity_type: EntityType;
+  since: Date;
+  name: string | null;
+  id_number: string | null;
+  gate: string;
+}
+
 export const occupancyRepo = {
   /**
    * Flips the entity to `inside` only if it is currently outside, or if its
@@ -40,10 +50,15 @@ export const occupancyRepo = {
             cleared_at: null,
           },
         },
-        { upsert: true, new: true }
+        { upsert: true }
       );
       return 'admitted';
     } catch (err: unknown) {
+      // This collection has exactly one unique index besides `_id`
+      // (`entity_type_1_entity_id_1`), so an E11000 here can only mean a
+      // passback. If a second unique index is ever added to this collection,
+      // this branch must start checking which index was violated before
+      // treating every E11000 as "already inside".
       if (isDuplicateKey(err)) return 'already_inside';
       throw err;
     }
@@ -74,10 +89,10 @@ export const occupancyRepo = {
    * The presence roster. Applies the same staleness rule as `enter`, so a
    * stranded row never shows up as somebody standing on campus.
    */
-  async listInside(boundary: Date, p: PaginationParams) {
+  async listInside(boundary: Date, p: PaginationParams): Promise<{ items: OccupancyListRow[]; total: number }> {
     const filter = { state: 'inside', since: { $gte: boundary } };
     const [items, total] = await Promise.all([
-      OccupancyModel.aggregate([
+      OccupancyModel.aggregate<OccupancyListRow>([
         { $match: filter },
         { $sort: { since: -1 } },
         { $skip: p.skip },
