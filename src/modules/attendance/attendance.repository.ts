@@ -1,6 +1,7 @@
 import { FilterQuery } from 'mongoose';
 import { AttendanceModel, IAttendance } from './attendance.model';
 import { PaginationParams } from '../../utils/pagination';
+import { isDuplicateKey } from '../../utils/isDuplicateKey';
 
 export const attendanceRepo = {
   findByPersonAndDate: (person_id: string, date: string) =>
@@ -15,7 +16,7 @@ export const attendanceRepo = {
       );
     } catch (err: unknown) {
       // A row already exists WITH a time_in (filter didn't match) → that's fine, return it.
-      if (typeof err === 'object' && err !== null && (err as { code?: number }).code === 11000) {
+      if (isDuplicateKey(err)) {
         return AttendanceModel.findOne({ person_id, date });
       }
       throw err;
