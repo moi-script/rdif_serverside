@@ -16,6 +16,7 @@ import { PersonModel } from '../modules/persons/persons.model';
 import { VehicleModel } from '../modules/vehicles/vehicles.model';
 import { UserModel } from '../modules/users/users.model';
 import { ScanLogModel } from '../modules/scan/scan.model';
+import { rebuildOccupancy } from './rebuildOccupancy';
 
 const failures: string[] = [];
 let checks = 0;
@@ -501,6 +502,54 @@ async function main(): Promise<void> {
     true
   );
 
+  await OccupancyModel.deleteMany({ entity_id: juan._id });
+
+  console.log('\n== occupancy rebuild (non-empty path) ==');
+  // Everything above this point only ever exercised rebuildOccupancy() with
+  // zero entities inside (every test entity gets exited before the next
+  // section), so insertMany and its field mapping (state/since/last_gate_id/
+  // entity_type/entity_id) had no automated coverage. This block proves the
+  // non-empty path end-to-end: a real HTTP entry tap, a full occupancy wipe,
+  // a rebuild, and field-level assertions against the reconstructed row.
+  await OccupancyModel.deleteMany({ entity_id: juan._id });
+  const rebuildEntry = await tap(superadmin, juanUid, personEntry, 'entry');
+  expectEqual('rebuild setup: entry granted', rebuildEntry.access_result, 'granted');
+
+  const entryLog = await ScanLogModel.findOne({
+    rfid_uid: juanUid,
+    direction: 'entry',
+    access_result: 'granted',
+  })
+    .sort({ scan_time: -1 })
+    .lean();
+  if (!entryLog) throw new Error('expected an entry log row for the rebuild non-empty-path check');
+
+  // Destructive: this wipes the ENTIRE occupancy collection, not just Juan's
+  // row. That's fine here — rebuildOccupancy() immediately reconstructs it
+  // from scan_logs, the actual source of truth, so nothing is permanently
+  // lost. Don't reuse this pattern in a context where scan_logs itself might
+  // be incomplete.
+  await OccupancyModel.deleteMany({});
+  const rebuildResult = await rebuildOccupancy();
+  expectEqual('rebuild marks at least one entity inside', rebuildResult.inside >= 1, true);
+
+  const rebuiltRow = await OccupancyModel.findOne({ entity_id: juan._id }).lean();
+  expectEqual('rebuilt row exists for the entered person', !!rebuiltRow, true);
+  expectEqual('rebuilt row state is inside', rebuiltRow?.state, 'inside');
+  expectEqual(
+    'rebuilt row since matches the entry log scan_time',
+    rebuiltRow?.since?.getTime(),
+    entryLog.scan_time.getTime()
+  );
+  expectEqual(
+    'rebuilt row last_gate_id matches the entry gate',
+    rebuiltRow?.last_gate_id?.toString(),
+    personEntry
+  );
+
+  // Release the state so the harness stays re-runnable.
+  const rebuildExit = await tap(superadmin, juanUid, personExit, 'exit');
+  expectEqual('rebuild teardown: exit granted', rebuildExit.access_result, 'granted');
   await OccupancyModel.deleteMany({ entity_id: juan._id });
 
   await mongoose.disconnect();

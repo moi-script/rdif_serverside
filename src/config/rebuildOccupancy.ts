@@ -24,15 +24,13 @@ interface Pending {
   last_gate_id: mongoose.Types.ObjectId | null;
 }
 
-async function main(): Promise<void> {
-  await connectDB();
-  // Mongoose builds indexes in the background. deleteMany + insertMany below
-  // races that build unless we wait for it: an earlier task in this feature
-  // hit duplicates being written before the unique (entity_type, entity_id)
-  // index finished, which then failed the index build permanently and
-  // silently disabled passback detection. server.ts and the verify harness
-  // both wait on this same call for the same reason.
-  await OccupancyModel.init();
+/**
+ * Replays granted scans since the last reset boundary and rewrites the
+ * occupancy collection to match. Assumes a live DB connection and that
+ * `OccupancyModel.init()` has already resolved — callers own connection
+ * lifecycle, this function only owns the replay.
+ */
+export async function rebuildOccupancy(): Promise<{ replayed: number; inside: number }> {
   const boundary = lastResetBoundary(new Date());
   console.log(`[rebuild] replaying granted scans since ${boundary.toISOString()}`);
 
@@ -61,6 +59,13 @@ async function main(): Promise<void> {
     }
   }
 
+  // NOT atomic: MongoDB transactions need a replica set, so this stays a
+  // plain delete-then-insert by design. If insertMany below throws after this
+  // delete has already succeeded, the collection is left EMPTY — everyone
+  // previously marked inside is forgotten, and every card can re-enter
+  // without ever having "exited". The catch block in main() below calls this
+  // out explicitly so an operator never mistakes a partial failure for a
+  // no-op.
   await OccupancyModel.deleteMany({});
   if (inside.size > 0) {
     // Only `inside` rows are written. A missing document already means outside,
@@ -79,10 +84,47 @@ async function main(): Promise<void> {
   }
 
   console.log(`[rebuild] ${logs.length} scans replayed, ${inside.size} entities marked inside`);
+  return { replayed: logs.length, inside: inside.size };
+}
+
+async function main(): Promise<void> {
+  await connectDB();
+  // Mongoose builds indexes in the background. deleteMany + insertMany below
+  // races that build unless we wait for it: an earlier task in this feature
+  // hit duplicates being written before the unique (entity_type, entity_id)
+  // index finished, which then failed the index build permanently and
+  // silently disabled passback detection. server.ts and the verify harness
+  // both wait on this same call for the same reason.
+  await OccupancyModel.init();
+
+  try {
+    await rebuildOccupancy();
+  } catch (err) {
+    // deleteMany has already run by the time insertMany can fail, so a
+    // failure here is not "nothing happened" — it is "occupancy is now
+    // empty". Say so explicitly rather than leaving the operator to guess
+    // whether the gate can still be trusted.
+    console.error(
+      '[rebuild:occupancy] failed after clearing the occupancy collection. ' +
+        'Occupancy may now be EMPTY (everyone reads as outside) — re-run ' +
+        '`npm run rebuild:occupancy` before trusting the gate again.',
+      err
+    );
+    await mongoose.disconnect();
+    process.exit(1);
+  }
+
   await mongoose.disconnect();
 }
 
-main().catch((err) => {
-  console.error('[rebuild:occupancy] failed', err);
-  process.exit(1);
-});
+// Only run the CLI entrypoint when this file is executed directly (`npm run
+// rebuild:occupancy`). Without this guard, importing `rebuildOccupancy` as a
+// module (as verifyPassback.ts does) would also fire this unconditional
+// `main()` call, opening a second competing DB connection and disconnecting
+// it out from under whichever caller imported the function.
+if (require.main === module) {
+  main().catch((err) => {
+    console.error('[rebuild:occupancy] failed', err);
+    process.exit(1);
+  });
+}
