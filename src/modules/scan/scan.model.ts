@@ -5,7 +5,7 @@ export interface IScanLog extends Document {
   rfid_uid: string;
   entity_type: 'person' | 'vehicle';
   entity_id: Types.ObjectId | null;
-  gate_id: Types.ObjectId;
+  gate_id: Types.ObjectId | null;
   direction: 'entry' | 'exit';
   access_result: 'granted' | 'denied';
   reason: string | null;
@@ -18,7 +18,8 @@ const scanLogSchema = new Schema<IScanLog>({
   rfid_uid: { type: String, required: true, index: true },
   entity_type: { type: String, enum: ['person', 'vehicle'], required: true },
   entity_id: { type: Schema.Types.ObjectId, default: null },
-  gate_id: { type: Schema.Types.ObjectId, ref: 'Gate', required: true },
+  // Nullable because a manual override is a real scan-log event with no gate.
+  gate_id: { type: Schema.Types.ObjectId, ref: 'Gate', default: null },
   direction: { type: String, enum: ['entry', 'exit'], required: true },
   access_result: { type: String, enum: ['granted', 'denied'], required: true },
   reason: { type: String, default: null },

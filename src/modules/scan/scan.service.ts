@@ -6,6 +6,8 @@ import { vehicleRepo } from '../vehicles/vehicles.repository';
 import { gateRepo } from '../gates/gates.repository';
 import { ApiError } from '../../utils/ApiError';
 import { env } from '../../config/env';
+import { occupancyRepo } from '../occupancy/occupancy.repository';
+import { lastResetBoundary } from '../../utils/occupancyWindow';
 
 interface TapInput {
   rfid_uid: string;
@@ -93,6 +95,34 @@ export const scanService = {
       access_result = 'denied';
       reason = 'wrong_gate_type';
       personView = undefined;
+    }
+
+    // Anti-passback. Runs only on taps that are otherwise granted, so a denied
+    // card can never move anyone's state — including a stranger repeatedly
+    // tapping a stolen inactive card.
+    if (access_result === 'granted' && entity_id) {
+      const gateOid = new Types.ObjectId(input.gate_id);
+      if (input.direction === 'entry') {
+        const outcome = await occupancyRepo.enter(
+          entity_type,
+          entity_id,
+          gateOid,
+          lastResetBoundary(scan_time)
+        );
+        if (outcome === 'already_inside') {
+          access_result = 'denied';
+          reason = 'already_inside';
+          // personView is deliberately KEPT: a guard needs to see who the
+          // system thinks is inside in order to resolve it.
+        }
+      } else {
+        const outcome = await occupancyRepo.release(entity_type, entity_id, gateOid);
+        if (outcome === 'exit_without_entry') {
+          // Granted anyway — egress is never blocked. The reason rides along on
+          // a granted row so the anomaly report can find it.
+          reason = 'exit_without_entry';
+        }
+      }
     }
 
     await scanRepo.createLog({

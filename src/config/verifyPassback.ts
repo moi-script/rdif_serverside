@@ -11,6 +11,8 @@ import { connectDB } from './db';
 import { OccupancyModel } from '../modules/occupancy/occupancy.model';
 import { occupancyRepo } from '../modules/occupancy/occupancy.repository';
 import { lastResetBoundary } from '../utils/occupancyWindow';
+import { PersonModel } from '../modules/persons/persons.model';
+import { VehicleModel } from '../modules/vehicles/vehicles.model';
 
 const failures: string[] = [];
 let checks = 0;
@@ -38,6 +40,66 @@ function summary(): void {
 /** Builds a local-time Date on a fixed calendar day, so assertions read clearly. */
 function at(day: number, hh: number, mm: number): Date {
   return new Date(2026, 6, day, hh, mm, 0, 0); // month 6 = July
+}
+
+const BASE = process.env.VERIFY_BASE_URL ?? 'http://localhost:3000/api';
+
+async function login(username: string, password: string): Promise<string> {
+  const res = await fetch(`${BASE}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  const body = (await res.json()) as { data?: { accessToken?: string } };
+  const token = body.data?.accessToken;
+  if (!token) throw new Error(`login failed for '${username}' (HTTP ${res.status})`);
+  return token;
+}
+
+async function request(
+  token: string | null,
+  method: string,
+  path: string,
+  body?: unknown
+): Promise<{ status: number; json: Record<string, unknown> }> {
+  const res = await fetch(`${BASE}${path}`, {
+    method,
+    headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  let json: Record<string, unknown> = {};
+  try {
+    json = (await res.json()) as Record<string, unknown>;
+  } catch {
+    // Some responses have no JSON body; the status is what matters.
+  }
+  return { status: res.status, json };
+}
+
+interface TapData {
+  access_result: 'granted' | 'denied';
+  reason: string | null;
+}
+
+/** Taps as a superadmin, which names the gate in the body (see scan.routes.ts). */
+async function tap(
+  token: string,
+  rfid_uid: string,
+  gate_id: string,
+  direction: 'entry' | 'exit'
+): Promise<TapData> {
+  const { json } = await request(token, 'POST', '/scan/tap', { rfid_uid, gate_id, direction });
+  return (json.data ?? {}) as TapData;
+}
+
+/** Resolves the seeded gates by name so the harness does not hardcode ObjectIds. */
+async function gateIdsByName(token: string): Promise<Record<string, string>> {
+  const { json } = await request(token, 'GET', '/gates');
+  const list = (json.data ?? []) as { _id: string; name: string }[];
+  return Object.fromEntries(list.map((g) => [g.name, g._id]));
 }
 
 async function main(): Promise<void> {
@@ -208,6 +270,74 @@ async function main(): Promise<void> {
   }
 
   await OccupancyModel.deleteMany({ entity_id: personId });
+
+  console.log('\n== passback at the gate ==');
+  const superadmin = await login('testadmin', 'Admin@123');
+  const gates = await gateIdsByName(superadmin);
+  const personEntry = gates['Main Entrance'];
+  const personExit = gates['Side Gate'];
+  const vehicleEntry = gates['Parking Entrance'];
+  const vehicleExit = gates['Parking Exit'];
+
+  // Juan Dela Cruz from seed:test. Start from a known state.
+  const juan = await PersonModel.findOne({ id_number: '2025-0001' }).lean();
+  if (!juan) throw new Error('run `npm run seed:test` first — student 2025-0001 is missing');
+  await OccupancyModel.deleteMany({ entity_id: juan._id });
+  const juanUid = juan.rfid_uid as string;
+
+  const first = await tap(superadmin, juanUid, personEntry, 'entry');
+  expectEqual('first entry granted', first.access_result, 'granted');
+  expectEqual('first entry has no reason', first.reason, null);
+
+  const second = await tap(superadmin, juanUid, personEntry, 'entry');
+  expectEqual('repeat entry denied', second.access_result, 'denied');
+  expectEqual('repeat entry names the passback', second.reason, 'already_inside');
+
+  const out = await tap(superadmin, juanUid, personExit, 'exit');
+  expectEqual('exit granted', out.access_result, 'granted');
+  expectEqual('exit has no reason', out.reason, null);
+
+  const again = await tap(superadmin, juanUid, personEntry, 'entry');
+  expectEqual('entry after a real exit granted', again.access_result, 'granted');
+
+  await tap(superadmin, juanUid, personExit, 'exit');
+  const orphanExit = await tap(superadmin, juanUid, personExit, 'exit');
+  expectEqual('exit with no entry is never blocked', orphanExit.access_result, 'granted');
+  expectEqual('exit with no entry is flagged', orphanExit.reason, 'exit_without_entry');
+
+  // A denied tap must not move anyone's state. Tapping a person card at a
+  // VEHICLE gate is denied for wrong_gate_type before occupancy is consulted;
+  // if it leaked through, the entry below would come back already_inside.
+  const wrongGate = await tap(superadmin, juanUid, vehicleEntry, 'entry');
+  expectEqual('person card at a vehicle gate denied', wrongGate.reason, 'wrong_gate_type');
+  const afterWrongGate = await tap(superadmin, juanUid, personEntry, 'entry');
+  expectEqual('a denied tap left state untouched', afterWrongGate.access_result, 'granted');
+  await tap(superadmin, juanUid, personExit, 'exit');
+
+  // Vehicles are covered too.
+  const car = await VehicleModel.findOne({}).lean();
+  if (car) {
+    await OccupancyModel.deleteMany({ entity_id: car._id });
+    const carUid = car.rfid_uid;
+    expectEqual(
+      'vehicle first entry granted',
+      (await tap(superadmin, carUid, vehicleEntry, 'entry')).access_result,
+      'granted'
+    );
+    expectEqual(
+      'vehicle repeat entry denied',
+      (await tap(superadmin, carUid, vehicleEntry, 'entry')).reason,
+      'already_inside'
+    );
+    expectEqual(
+      'vehicle exit granted',
+      (await tap(superadmin, carUid, vehicleExit, 'exit')).access_result,
+      'granted'
+    );
+    await OccupancyModel.deleteMany({ entity_id: car._id });
+  }
+
+  await OccupancyModel.deleteMany({ entity_id: juan._id });
   await mongoose.disconnect();
   summary();
 }
