@@ -345,6 +345,64 @@ async function main(): Promise<void> {
   }
 
   await OccupancyModel.deleteMany({ entity_id: juan._id });
+
+  console.log('\n== presence roster and override ==');
+  const registrar = await login('testregistrar', 'Registrar@123');
+
+  await OccupancyModel.deleteMany({ entity_id: juan._id });
+  await tap(superadmin, juanUid, personEntry, 'entry');
+
+  const roster = await request(superadmin, 'GET', '/occupancy');
+  expectEqual('superadmin may read the roster', roster.status, 200);
+  const rows = (roster.json.data ?? []) as { _id: string; name: string; entity_type: string }[];
+  const juanRow = rows.find((r) => r.name === juan.full_name);
+  expectEqual('the person who tapped in is on the roster', !!juanRow, true);
+  expectEqual('roster rows name their entity type', juanRow?.entity_type, 'person');
+
+  expectEqual(
+    'registrar may not read the roster',
+    (await request(registrar, 'GET', '/occupancy')).status,
+    403
+  );
+  expectEqual(
+    'an anonymous caller may not read the roster',
+    (await request(null, 'GET', '/occupancy')).status,
+    401
+  );
+
+  expectEqual(
+    'registrar may not clear state',
+    (await request(registrar, 'POST', `/occupancy/${juanRow?._id}/clear`, {})).status,
+    403
+  );
+
+  const cleared = await request(superadmin, 'POST', `/occupancy/${juanRow?._id}/clear`, {});
+  expectEqual('superadmin may clear state', cleared.status, 200);
+
+  // Immediately again, with nothing tapped in between: the row is genuinely
+  // outside now, so there is nothing to clear and the client must not retry.
+  const stale = await request(superadmin, 'POST', `/occupancy/${juanRow?._id}/clear`, {});
+  expectEqual('clearing an already-cleared row is a 404', stale.status, 404);
+
+  // The override actually released the card: it may enter again with no exit tap.
+  expectEqual(
+    'a cleared card may enter again',
+    (await tap(superadmin, juanUid, personEntry, 'entry')).access_result,
+    'granted'
+  );
+
+  // And a legitimate second visit is still clearable — the 404 above is about
+  // state, not about the row being spent.
+  const roster2 = await request(superadmin, 'GET', '/occupancy');
+  const rows2 = (roster2.json.data ?? []) as { _id: string; name: string }[];
+  const juanRow2 = rows2.find((r) => r.name === juan.full_name);
+  expectEqual(
+    'a re-entered card can be cleared again',
+    (await request(superadmin, 'POST', `/occupancy/${juanRow2?._id}/clear`, {})).status,
+    200
+  );
+
+  await OccupancyModel.deleteMany({ entity_id: juan._id });
   await mongoose.disconnect();
   summary();
 }

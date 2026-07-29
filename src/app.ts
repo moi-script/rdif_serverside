@@ -18,6 +18,7 @@ import { userRoutes } from './modules/users/users.routes';
 import { logRoutes } from './modules/logs/logs.routes';
 import { dashboardRoutes } from './modules/dashboard/dashboard.routes';
 import { reportRoutes } from './modules/reports/reports.routes';
+import { occupancyRoutes } from './modules/occupancy/occupancy.routes';
 
 export function createApp(): Express {
   const app = express();
@@ -42,6 +43,7 @@ export function createApp(): Express {
   app.use(`${prefix}/vehicles`, vehicleRoutes);
   app.use(`${prefix}/gates`, gateRoutes);
   app.use(`${prefix}/scan`, scanRoutes);
+  app.use(`${prefix}/occupancy`, occupancyRoutes);
   app.use(`${prefix}/attendance`, attendanceRoutes);
   app.use(`${prefix}/users`, userRoutes);
   app.use(`${prefix}/logs`, logRoutes);
