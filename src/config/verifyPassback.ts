@@ -441,6 +441,15 @@ async function main(): Promise<void> {
   expectEqual('passbacks appear in the report', reasons.includes('already_inside'), true);
   expectEqual('orphan exits appear in the report', reasons.includes('exit_without_entry'), true);
   expectEqual('report rows resolve the person name', !!payload.rows[0]?.name, true);
+  // The $in filter is the entire mechanism of this endpoint. wrong_gate_type
+  // rows already exist from the "passback at the gate" section above, so this
+  // is a real negative check, not a tautology — an implementation that
+  // matched everything (or used $ne: null) would fail it.
+  expectEqual(
+    'non-anomaly reasons stay out of the report',
+    reasons.includes('wrong_gate_type'),
+    false
+  );
 
   expectEqual(
     'registrar may not read the anomaly report',
@@ -448,7 +457,13 @@ async function main(): Promise<void> {
     403
   );
 
+  // A malformed gate_id must be a clean validation error, not a crash that
+  // leaks a raw BSON error message.
+  const badGateId = await request(superadmin, 'GET', '/reports/gate-activity?gate_id=bogus');
+  expectEqual('a malformed gate_id is a clean 422, not a 500', badGateId.status, 422);
+
   // Manual overrides are audit events and must be findable in the same report.
+  const overrideAt = new Date();
   await tap(superadmin, juanUid, personEntry, 'entry');
   const live = await request(superadmin, 'GET', '/occupancy');
   const liveRows = (live.json.data ?? []) as { _id: string; name: string }[];
@@ -456,11 +471,23 @@ async function main(): Promise<void> {
   await request(superadmin, 'POST', `/occupancy/${row?._id}/clear`, {});
 
   const afterOverride = await request(superadmin, 'GET', '/reports/anomalies');
-  const afterRows = ((afterOverride.json.data ?? {}) as { rows: { reason: string }[] }).rows;
+  const afterRows = ((afterOverride.json.data ?? {}) as {
+    rows: { reason: string; rfid_uid: string; scan_time: string; actor?: string }[];
+  }).rows;
+  // Match on this run's own row (by UID and timestamp), not just "any
+  // manual_override row exists anywhere in the 500-row window" — the earlier
+  // roster/override section already produced one of those.
+  const overrideRow = afterRows.find(
+    (r) =>
+      r.reason === 'manual_override' &&
+      r.rfid_uid === juanUid &&
+      new Date(r.scan_time).getTime() >= overrideAt.getTime()
+  );
+  expectEqual('this run\'s manual override is auditable', !!overrideRow, true);
   expectEqual(
-    'a manual override is auditable',
-    afterRows.some((r) => r.reason === 'manual_override'),
-    true
+    'the override row names the acting superadmin',
+    overrideRow?.actor,
+    'testadmin'
   );
 
   // Override rows have no gate, so they must not pollute gate activity.

@@ -1,6 +1,7 @@
 import { FilterQuery, Types } from 'mongoose';
 import { AttendanceModel, IAttendance } from '../attendance/attendance.model';
 import { ScanLogModel, IScanLog } from '../scan/scan.model';
+import { ApiError } from '../../utils/ApiError';
 
 interface AttendanceReportQuery {
   from?: string;
@@ -36,6 +37,9 @@ export const reportService = {
   async gateActivity(query: GateActivityQuery) {
     const match: FilterQuery<IScanLog> = {};
     if (query.gate_id) {
+      if (!Types.ObjectId.isValid(query.gate_id)) {
+        throw new ApiError('VALIDATION_ERROR', 'invalid gate_id');
+      }
       match.gate_id = new Types.ObjectId(query.gate_id) as unknown as IScanLog['gate_id'];
     } else {
       // Manual-override rows have no gate. Without this they aggregate into a
@@ -84,7 +88,9 @@ export const reportService = {
       { $sort: { scan_time: -1 } },
       { $limit: 500 },
       { $lookup: { from: 'people', localField: 'entity_id', foreignField: '_id', as: 'person' } },
+      { $lookup: { from: 'vehicles', localField: 'entity_id', foreignField: '_id', as: 'vehicle' } },
       { $lookup: { from: 'gates', localField: 'gate_id', foreignField: '_id', as: 'gate' } },
+      { $lookup: { from: 'users', localField: 'actor_user_id', foreignField: '_id', as: 'actor' } },
       {
         $project: {
           _id: 0,
@@ -94,8 +100,20 @@ export const reportService = {
           access_result: 1,
           entity_type: 1,
           rfid_uid: 1,
-          name: { $arrayElemAt: ['$person.full_name', 0] },
-          gate: { $ifNull: [{ $arrayElemAt: ['$gate.name', 0] }, 'Manual override'] },
+          name: {
+            $ifNull: [
+              { $arrayElemAt: ['$person.full_name', 0] },
+              { $arrayElemAt: ['$vehicle.plate_number', 0] },
+            ],
+          },
+          gate: {
+            $cond: [
+              { $eq: ['$reason', 'manual_override'] },
+              'Manual override',
+              { $ifNull: [{ $arrayElemAt: ['$gate.name', 0] }, 'Unknown gate'] },
+            ],
+          },
+          actor: { $arrayElemAt: ['$actor.username', 0] },
         },
       },
     ]);
