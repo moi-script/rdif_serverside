@@ -436,8 +436,20 @@ async function main(): Promise<void> {
   expectEqual('superadmin may read the anomaly report', report.status, 200);
   const payload = (report.json.data ?? {}) as {
     count: number;
+    total: number;
+    truncated: boolean;
     rows: { reason: string; name?: string }[];
   };
+  // The $limit: 500 cap can silently hide anomalies from an operator who only
+  // reads `count`. `total` (a real countDocuments) and `truncated` must be
+  // present and self-consistent so a caller can tell "500" from "at least
+  // 500" — this run's window is nowhere near the cap, so truncated must be
+  // false and total must equal count and rows.length exactly.
+  expectEqual('anomaly report exposes a total count', typeof payload.total, 'number');
+  expectEqual('anomaly report exposes a truncated flag', typeof payload.truncated, 'boolean');
+  expectEqual('total matches rows.length when under the cap', payload.total, payload.rows.length);
+  expectEqual('count still matches rows.length', payload.count, payload.rows.length);
+  expectEqual('truncated is false when under the cap', payload.truncated, false);
   const reasons = payload.rows.map((r) => r.reason);
   expectEqual('passbacks appear in the report', reasons.includes('already_inside'), true);
   expectEqual('orphan exits appear in the report', reasons.includes('exit_without_entry'), true);

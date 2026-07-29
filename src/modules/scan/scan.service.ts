@@ -126,7 +126,12 @@ export const scanService = {
         let outcome: 'released' | 'exit_without_entry';
         try {
           outcome = await occupancyRepo.release(entity_type, entity_id, gateOid);
-        } catch {
+        } catch (err) {
+          console.error(
+            `[scan] occupancy unavailable on exit for ${entity_type} ${entity_id.toString()}; ` +
+              'granting access anyway (fail-open)',
+            err
+          );
           reason = 'occupancy_unavailable';
           outcome = 'released';
         }

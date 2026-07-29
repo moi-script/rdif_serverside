@@ -117,6 +117,13 @@ export const reportService = {
         },
       },
     ]);
-    return { count: rows.length, rows };
+    // The $limit: 500 above can silently hide rows: cheap-to-generate
+    // exit_without_entry activity can push an override past the cap without
+    // destroying it (a `from`/`to` range still recovers it), so an operator
+    // reading only `count` cannot tell "500" from "at least 500". Mirror the
+    // roster-truncation fix already shipped on the frontend: report the true
+    // total alongside the capped rows and flag when they diverge.
+    const total = await ScanLogModel.countDocuments(match);
+    return { count: rows.length, total, truncated: total > rows.length, rows };
   },
 };

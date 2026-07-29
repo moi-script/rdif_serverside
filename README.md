@@ -53,7 +53,11 @@ node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
 - `npm run seed` — seed admin + gates (idempotent)
 - `npm run seed:test` — seed hardcoded test accounts for the testing phase (idempotent)
 - `npm run lint` — eslint
-- `npm run verify:passback` — assert anti-passback behaviour (needs `dev` + `seed:test`)
+- `npm run verify:passback` — assert anti-passback behaviour (needs `dev` + `seed:test`).
+  **Destructive to live occupancy state**: its rebuild-path check calls
+  `OccupancyModel.deleteMany({})` on the whole collection before reconstructing
+  it from `scan_logs`. It self-heals within the same run, but do not run it
+  against a live campus mid-day.
 - `npm run rebuild:occupancy` — reconcile occupancy state from `scan_logs`
 
 ### Troubleshooting
@@ -72,7 +76,11 @@ node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
   the scan log since the last nightly reset boundary. The script itself waits
   for the unique `(entity_type, entity_id)` index to finish building before
   writing, for the same reason described above — don't skip that wait when
-  editing the script.
+  editing the script. **The `occupancies` collection reads completely EMPTY
+  for the duration of the rebuild** (it wipes before it replays): a live
+  server serving taps mid-rebuild admits everyone, since every card looks
+  like a first entry. Take the gate offline for the rebuild window, or accept
+  that every tap during it is treated as a fresh entry.
 
 ## Test accounts (`npm run seed:test`)
 
@@ -128,6 +136,21 @@ case: it caused a real intermittent test failure during development. When
 building a client, script, or test against `/attendance`, derive the date
 key the same way the server does (local `Date` components), never via
 `toISOString()`.
+
+The same bug class applies to `OCCUPANCY_RESET_TIME` (default `23:00`).
+`lastResetBoundary()` interprets it in the server's **local** time via
+`Date#setHours`, exactly like `isLate()` above — never UTC. This is not a
+cosmetic difference: on a host running with `TZ=UTC` and the default left
+untouched, the boundary resolves to 07:00 Manila — inside the morning
+arrival rush. Every card that tapped between roughly 05:00 and 07:00 has
+`since` before that boundary once it passes, so the lazy-expiry check on the
+next read treats it as outside and grants a free re-entry — a passback
+window opening every single morning, with no log line and no alert. It is
+invisible to `npm run verify:passback` because that harness computes its
+expectations from the same local clock it is testing, so a wrong host
+timezone shifts both sides together. Deployments MUST either set
+`TZ=Asia/Manila` (or the correct campus timezone) or knowingly accept that
+window — do not leave a UTC host on the default.
 
 ## Data model
 
