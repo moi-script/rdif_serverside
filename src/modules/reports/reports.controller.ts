@@ -10,4 +10,7 @@ export const reportController = {
   gateActivity: asyncHandler(async (req: Request, res: Response) => {
     sendSuccess(res, await reportService.gateActivity(req.query as Record<string, string>));
   }),
+  anomalies: asyncHandler(async (req: Request, res: Response) => {
+    sendSuccess(res, await reportService.anomalies(req.query as Record<string, string>));
+  }),
 };

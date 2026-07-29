@@ -422,6 +422,60 @@ async function main(): Promise<void> {
   );
 
   await OccupancyModel.deleteMany({ entity_id: juan._id });
+
+  console.log('\n== anomaly report ==');
+
+  await OccupancyModel.deleteMany({ entity_id: juan._id });
+  await tap(superadmin, juanUid, personEntry, 'entry');
+  await tap(superadmin, juanUid, personEntry, 'entry'); // already_inside
+  await tap(superadmin, juanUid, personExit, 'exit');
+  await tap(superadmin, juanUid, personExit, 'exit'); // exit_without_entry
+
+  const report = await request(superadmin, 'GET', '/reports/anomalies');
+  expectEqual('superadmin may read the anomaly report', report.status, 200);
+  const payload = (report.json.data ?? {}) as {
+    count: number;
+    rows: { reason: string; name?: string }[];
+  };
+  const reasons = payload.rows.map((r) => r.reason);
+  expectEqual('passbacks appear in the report', reasons.includes('already_inside'), true);
+  expectEqual('orphan exits appear in the report', reasons.includes('exit_without_entry'), true);
+  expectEqual('report rows resolve the person name', !!payload.rows[0]?.name, true);
+
+  expectEqual(
+    'registrar may not read the anomaly report',
+    (await request(registrar, 'GET', '/reports/anomalies')).status,
+    403
+  );
+
+  // Manual overrides are audit events and must be findable in the same report.
+  await tap(superadmin, juanUid, personEntry, 'entry');
+  const live = await request(superadmin, 'GET', '/occupancy');
+  const liveRows = (live.json.data ?? []) as { _id: string; name: string }[];
+  const row = liveRows.find((r) => r.name === juan.full_name);
+  await request(superadmin, 'POST', `/occupancy/${row?._id}/clear`, {});
+
+  const afterOverride = await request(superadmin, 'GET', '/reports/anomalies');
+  const afterRows = ((afterOverride.json.data ?? {}) as { rows: { reason: string }[] }).rows;
+  expectEqual(
+    'a manual override is auditable',
+    afterRows.some((r) => r.reason === 'manual_override'),
+    true
+  );
+
+  // Override rows have no gate, so they must not pollute gate activity.
+  const activity = await request(superadmin, 'GET', '/reports/gate-activity');
+  const buckets = ((activity.json.data ?? {}) as {
+    rows: { _id: { gate_id: string | null } }[];
+  }).rows;
+  expectEqual(
+    'gate activity excludes gateless override rows',
+    buckets.every((b) => b._id.gate_id !== null),
+    true
+  );
+
+  await OccupancyModel.deleteMany({ entity_id: juan._id });
+
   await mongoose.disconnect();
   summary();
 }
