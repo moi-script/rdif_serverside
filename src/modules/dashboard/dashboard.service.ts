@@ -91,7 +91,12 @@ export const dashboardService = {
     if (actor.role === ROLES.SUPERADMIN) {
       return this.adminView();
     }
-    if (actor.role === ROLES.REGISTRAR) {
+    if (actor.role === ROLES.REGISTRAR || actor.role === ROLES.HR || actor.role === ROLES.OSS) {
+      // hr and oss get the same registration-focused summary as registrar:
+      // no scan or gate data, consistent with Subsystem A's ruling. Without
+      // an explicit arm here they fell through to the unlinked/guard shape
+      // below ({ gates }), which the frontend does not expect for an admin
+      // role.
       return this.registrarView();
     }
     if (actor.personId) return this.userView(actor.personId);

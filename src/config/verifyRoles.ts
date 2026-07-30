@@ -337,6 +337,8 @@ async function runChecks(): Promise<void> {
   for (const path of ['/logs', '/reports/attendance', '/scan/logs']) {
     await check(`superadmin GET ${path}`, superadmin, 'GET', path, OK);
     await check(`registrar GET ${path} denied`, registrar, 'GET', path, FORBIDDEN);
+    await check(`hr GET ${path} denied`, hr, 'GET', path, FORBIDDEN);
+    await check(`oss GET ${path} denied`, oss, 'GET', path, FORBIDDEN);
     await check(`student GET ${path} denied`, student, 'GET', path, FORBIDDEN);
   }
 
@@ -344,6 +346,8 @@ async function runChecks(): Promise<void> {
   for (const [name, token] of [
     ['superadmin', superadmin],
     ['registrar', registrar],
+    ['hr', hr],
+    ['oss', oss],
     ['staff', staff],
     ['student', student],
   ] as const) {
@@ -351,30 +355,36 @@ async function runChecks(): Promise<void> {
     await check(`${name} GET /gates`, token, 'GET', '/gates', OK);
   }
 
-  console.log('\n== registrar dashboard is registration-only (no scan/gate/vehicle leak) ==');
-  const registrarDashboard = await request(registrar, 'GET', '/dashboard');
-  expectEqual('registrar dashboard responds 200', registrarDashboard.status, OK);
-  const registrarDashboardData = (registrarDashboard.json.data ?? {}) as Record<string, unknown>;
-  expectEqual(
-    'registrar dashboard carries registration data',
-    typeof registrarDashboardData.total_persons === 'number',
-    true
-  );
-  expectEqual(
-    'registrar dashboard has no recent_scans key',
-    Object.prototype.hasOwnProperty.call(registrarDashboardData, 'recent_scans'),
-    false
-  );
-  expectEqual(
-    'registrar dashboard has no parking_activity key',
-    Object.prototype.hasOwnProperty.call(registrarDashboardData, 'parking_activity'),
-    false
-  );
-  expectEqual(
-    'registrar dashboard has no gates key',
-    Object.prototype.hasOwnProperty.call(registrarDashboardData, 'gates'),
-    false
-  );
+  console.log('\n== registrar/hr/oss dashboards are registration-only (no scan/gate/vehicle leak) ==');
+  for (const [name, token] of [
+    ['registrar', registrar],
+    ['hr', hr],
+    ['oss', oss],
+  ] as const) {
+    const roleDashboard = await request(token, 'GET', '/dashboard');
+    expectEqual(`${name} dashboard responds 200`, roleDashboard.status, OK);
+    const roleDashboardData = (roleDashboard.json.data ?? {}) as Record<string, unknown>;
+    expectEqual(
+      `${name} dashboard carries registration data`,
+      typeof roleDashboardData.total_persons === 'number',
+      true
+    );
+    expectEqual(
+      `${name} dashboard has no recent_scans key`,
+      Object.prototype.hasOwnProperty.call(roleDashboardData, 'recent_scans'),
+      false
+    );
+    expectEqual(
+      `${name} dashboard has no parking_activity key`,
+      Object.prototype.hasOwnProperty.call(roleDashboardData, 'parking_activity'),
+      false
+    );
+    expectEqual(
+      `${name} dashboard has no gates key`,
+      Object.prototype.hasOwnProperty.call(roleDashboardData, 'gates'),
+      false
+    );
+  }
 
   console.log('\n== attendance: superadmin, staff, and student may read; registrar may not ==');
   for (const [name, token] of [
@@ -1303,6 +1313,38 @@ async function runChecks(): Promise<void> {
     'hr may NOT change vehicle status',
     hr, 'PATCH', `/vehicles/${vehicleId}/status`, FORBIDDEN, { status: 'active' }
   );
+
+  console.log('\n== records (scan log) ==');
+
+  await check('superadmin GET /logs', superadmin, 'GET', '/logs', OK);
+  await check('registrar GET /logs denied', registrar, 'GET', '/logs', FORBIDDEN);
+  await check('hr GET /logs denied', hr, 'GET', '/logs', FORBIDDEN);
+  await check('oss GET /logs denied', oss, 'GET', '/logs', FORBIDDEN);
+  await check('student GET /logs denied', student, 'GET', '/logs', FORBIDDEN);
+
+  const logs = await request(superadmin, 'GET', '/logs?limit=50');
+  const logRows = (logs.json.data as Record<string, unknown>[]) ?? [];
+  // Length floor: every assertion below is vacuously true on an empty array.
+  expectEqual('log rows exist to inspect', logRows.length > 0, true);
+
+  const personRow = logRows.find((r) => r.entity_type === 'person' && r.subject !== null);
+  expectEqual('a person scan row exists', Boolean(personRow), true);
+  const subject = personRow!.subject as { full_name?: string } | null;
+  expectEqual('subject is resolved, not an ObjectId', typeof subject?.full_name, 'string');
+  expectEqual('resolved name is non-empty', (subject?.full_name ?? '').length > 0, true);
+
+  expectEqual('rows expose a gate field', 'gate' in personRow!, true);
+  expectEqual('meta exposes a total', typeof (logs.json.meta as { total?: number })?.total, 'number');
+
+  // access_result filter must actually filter.
+  const deniedOnly = await request(superadmin, 'GET', '/logs?access_result=denied&limit=50');
+  const deniedRows = (deniedOnly.json.data as { access_result: string }[]) ?? [];
+  expectEqual('denied filter returns rows', deniedRows.length > 0, true);
+  expectEqual('denied filter returns only denials', deniedRows.every((r) => r.access_result === 'denied'), true);
+
+  // A malformed gate_id must be a clean 422, not a 500 with a leaked BSON
+  // message — the same defect the anomaly report shipped with.
+  await check('malformed gate_id is 422', superadmin, 'GET', '/logs?gate_id=not-an-id', 422);
 }
 
 /**

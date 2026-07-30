@@ -1,5 +1,6 @@
 import { Types } from 'mongoose';
 import { scanRepo } from './scan.repository';
+import { ScanLogModel } from './scan.model';
 import { attendanceRepo } from '../attendance/attendance.repository';
 import { personRepo } from '../persons/persons.repository';
 import { vehicleRepo } from '../vehicles/vehicles.repository';
@@ -169,18 +170,100 @@ export const scanService = {
   },
 
   async listLogs(query: Record<string, string | undefined>) {
-    const { getPagination, buildMeta } = await import('../../utils/pagination');
+    const { getPagination } = await import('../../utils/pagination');
     const p = getPagination(query);
-    const filter: Record<string, unknown> = {};
-    if (query.gate_id) filter.gate_id = query.gate_id;
-    if (query.direction) filter.direction = query.direction;
+
+    const match: Record<string, unknown> = {};
+    if (query.gate_id) {
+      // Mongoose does NOT cast $match in an aggregation pipeline, so a raw
+      // string here would compare against ObjectIds and match nothing —
+      // silently returning an empty page instead of an error. Validate and
+      // convert, and reject a malformed id with 422 rather than letting a BSON
+      // error surface as a 500 with an internal message.
+      if (!Types.ObjectId.isValid(query.gate_id)) {
+        throw new ApiError('VALIDATION_ERROR', 'gate_id is not a valid id');
+      }
+      match.gate_id = new Types.ObjectId(query.gate_id);
+    }
+    if (query.direction) match.direction = query.direction;
+    if (query.access_result) match.access_result = query.access_result;
     if (query.from || query.to) {
       const range: Record<string, Date> = {};
+      // Callers pass local-time boundaries. Never derive these with
+      // toISOString(): the server buckets attendance and the occupancy reset
+      // boundary by LOCAL Date components, and a UTC-derived day queries the
+      // wrong bucket for part of every day outside UTC+0.
       if (query.from) range.$gte = new Date(query.from);
       if (query.to) range.$lte = new Date(query.to);
-      filter.scan_time = range;
+      match.scan_time = range;
     }
-    const { items, total } = await scanRepo.findLogsPaginated(filter, p);
-    return { items, meta: buildMeta(total, p.page, p.limit) };
+
+    const pipeline = [
+      { $match: match },
+      { $sort: { scan_time: -1 as const } },
+      { $skip: p.skip },
+      { $limit: p.limit },
+      { $lookup: { from: 'people', localField: 'entity_id', foreignField: '_id', as: 'person' } },
+      { $lookup: { from: 'vehicles', localField: 'entity_id', foreignField: '_id', as: 'vehicle' } },
+      { $lookup: { from: 'gates', localField: 'gate_id', foreignField: '_id', as: 'gateDoc' } },
+      {
+        // Projection is a whitelist and the joined arrays are never projected
+        // themselves, so no field from a joined collection can leak.
+        $project: {
+          _id: 0,
+          id: { $toString: '$_id' },
+          scan_time: 1,
+          direction: 1,
+          access_result: 1,
+          reason: 1,
+          entity_type: 1,
+          rfid_uid: 1,
+          gate: {
+            $cond: [
+              { $gt: [{ $size: '$gateDoc' }, 0] },
+              {
+                id: { $toString: { $first: '$gateDoc._id' } },
+                name: { $first: '$gateDoc.name' },
+              },
+              // null on manual occupancy overrides, which write gate_id: null.
+              null,
+            ],
+          },
+          subject: {
+            $cond: [
+              { $gt: [{ $size: '$person' }, 0] },
+              {
+                full_name: { $first: '$person.full_name' },
+                id_number: { $first: '$person.id_number' },
+              },
+              {
+                $cond: [
+                  { $gt: [{ $size: '$vehicle' }, 0] },
+                  { plate_number: { $first: '$vehicle.plate_number' } },
+                  // null when the UID matched nothing — an unregistered card
+                  // has no entity to resolve.
+                  null,
+                ],
+              },
+            ],
+          },
+        },
+      },
+    ];
+
+    const [items, total] = await Promise.all([
+      ScanLogModel.aggregate(pipeline),
+      ScanLogModel.countDocuments(match),
+    ]);
+
+    // Flat meta shape (total/page/limit/truncated), not the nested
+    // buildMeta() { pagination: {...} } shape other list endpoints use: the
+    // RecordRow contract for this endpoint (task-8 brief) specifies a flat
+    // `meta.total`, and the harness asserts `typeof meta.total === 'number'`
+    // directly.
+    return {
+      items,
+      meta: { total, page: p.page, limit: p.limit, truncated: total > p.limit },
+    };
   },
 };
