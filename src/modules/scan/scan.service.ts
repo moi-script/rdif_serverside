@@ -9,6 +9,7 @@ import { ApiError } from '../../utils/ApiError';
 import { env } from '../../config/env';
 import { occupancyRepo } from '../occupancy/occupancy.repository';
 import { lastResetBoundary } from '../../utils/occupancyWindow';
+import { parseLocalDateRange } from '../../utils/dateRange';
 
 interface TapInput {
   rfid_uid: string;
@@ -188,14 +189,14 @@ export const scanService = {
     if (query.direction) match.direction = query.direction;
     if (query.access_result) match.access_result = query.access_result;
     if (query.from || query.to) {
-      const range: Record<string, Date> = {};
       // Callers pass local-time boundaries. Never derive these with
-      // toISOString(): the server buckets attendance and the occupancy reset
-      // boundary by LOCAL Date components, and a UTC-derived day queries the
-      // wrong bucket for part of every day outside UTC+0.
-      if (query.from) range.$gte = new Date(query.from);
-      if (query.to) range.$lte = new Date(query.to);
-      match.scan_time = range;
+      // toISOString() or a bare `new Date(str)`: the server buckets
+      // attendance and the occupancy reset boundary by LOCAL Date
+      // components, and a UTC-parsed day queries the wrong bucket for part
+      // of every day outside UTC+0. parseLocalDateRange also makes `to`
+      // an EXCLUSIVE next-day boundary so the selected day is fully
+      // included, not cut off at its own midnight.
+      match.scan_time = parseLocalDateRange(query.from, query.to);
     }
 
     const pipeline = [

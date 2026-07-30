@@ -2,6 +2,7 @@ import { FilterQuery, Types } from 'mongoose';
 import { AttendanceModel, IAttendance } from '../attendance/attendance.model';
 import { ScanLogModel, IScanLog } from '../scan/scan.model';
 import { ApiError } from '../../utils/ApiError';
+import { parseLocalDateRange } from '../../utils/dateRange';
 
 interface AttendanceReportQuery {
   from?: string;
@@ -47,10 +48,9 @@ export const reportService = {
       match.gate_id = { $ne: null } as unknown as IScanLog['gate_id'];
     }
     if (query.from || query.to) {
-      const range: Record<string, Date> = {};
-      if (query.from) range.$gte = new Date(query.from);
-      if (query.to) range.$lte = new Date(query.to);
-      match.scan_time = range;
+      // Local-day boundaries, exclusive `to` — same defect and fix as
+      // scan.service.ts's listLogs; see utils/dateRange.ts.
+      match.scan_time = parseLocalDateRange(query.from, query.to);
     }
     const rows = await ScanLogModel.aggregate([
       { $match: match },
@@ -77,10 +77,9 @@ export const reportService = {
       },
     };
     if (query.from || query.to) {
-      const range: Record<string, Date> = {};
-      if (query.from) range.$gte = new Date(query.from);
-      if (query.to) range.$lte = new Date(query.to);
-      match.scan_time = range;
+      // Local-day boundaries, exclusive `to` — same defect and fix as
+      // scan.service.ts's listLogs; see utils/dateRange.ts.
+      match.scan_time = parseLocalDateRange(query.from, query.to);
     }
 
     const rows = await ScanLogModel.aggregate([
