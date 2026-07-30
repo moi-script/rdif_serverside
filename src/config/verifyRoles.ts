@@ -20,24 +20,23 @@ import {
 } from '../constants/roles';
 import { assertCanActOn, assertCanCreateRole, assertCanWrite, type Actor } from '../utils/authority';
 import { shouldBypassRateLimit } from '../middlewares/rateLimiter';
+import { installVerifyBypass } from './verifyBypass';
 import { connectDB, disconnectDB } from './db';
 import { PersonModel } from '../modules/persons/persons.model';
 import { UserModel } from '../modules/users/users.model';
 import { VehicleModel } from '../modules/vehicles/vehicles.model';
 import { grantSuperadmin } from './grantSuperadmin';
 
-const BASE = process.env.VERIFY_BASE_URL ?? 'http://localhost:3000/api';
+// Installs the X-Verify-Bypass header on every fetch() this process makes,
+// once, before any request goes out — see verifyBypass.ts. The server's rate
+// limiters only honour it when NODE_ENV isn't production AND
+// VERIFY_BYPASS_TOKEN is set to the same value server-side (see
+// shouldBypassRateLimit() in middlewares/rateLimiter.ts) — so leaving
+// VERIFY_BYPASS_TOKEN unset means this run is subject to the real limits,
+// exactly like before this opt-out existed.
+installVerifyBypass();
 
-// Every harness request carries this header. The server's rate limiters only
-// honour it when NODE_ENV isn't production AND VERIFY_BYPASS_TOKEN is set to
-// the same value server-side (see shouldBypassRateLimit() in
-// middlewares/rateLimiter.ts) — so leaving VERIFY_BYPASS_TOKEN unset here
-// just means this run is subject to the real limits, exactly like before this
-// opt-out existed.
-const VERIFY_BYPASS_TOKEN = process.env.VERIFY_BYPASS_TOKEN;
-const BYPASS_HEADERS: Record<string, string> = VERIFY_BYPASS_TOKEN
-  ? { 'X-Verify-Bypass': VERIFY_BYPASS_TOKEN }
-  : {};
+const BASE = process.env.VERIFY_BASE_URL ?? 'http://localhost:3000/api';
 
 const failures: string[] = [];
 let checks = 0;
@@ -48,7 +47,7 @@ async function login(
 ): Promise<{ token: string; role: string | undefined }> {
   const res = await fetch(`${BASE}/auth/login`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...BYPASS_HEADERS },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username, password }),
   });
   const body = (await res.json()) as { data?: { accessToken?: string; user?: { role?: string } } };
@@ -70,7 +69,6 @@ async function request(
     headers: {
       Authorization: `Bearer ${token}`,
       ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
-      ...BYPASS_HEADERS,
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
@@ -640,7 +638,7 @@ async function runChecks(): Promise<void> {
   // A deactivated account cannot log in.
   const deniedLogin = await fetch(`${BASE}/auth/login`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...BYPASS_HEADERS },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username: '2025-0001', password: 'Student@123' }),
   });
   expectEqual('deactivated user cannot log in', deniedLogin.status, 401);
@@ -1069,7 +1067,7 @@ async function runChecks(): Promise<void> {
 
   const deletedLogin = await fetch(`${BASE}/auth/login`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...BYPASS_HEADERS },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username: delUsername, password: 'Verify@12345' }),
   });
   expectEqual('deleted user cannot log in', deletedLogin.status, 401);

@@ -5,10 +5,17 @@
  * Requires: `npm run dev` running, and `npm run seed:test` already applied.
  * Run with: npm run verify:signatures
  */
-// This script needs no imports, which would leave TypeScript treating it as a
-// global script and colliding with verifyRoles.ts over `failures`, `checks`,
-// and `BASE`. The empty export makes it a module and keeps them local.
-export {};
+// This script used to need no imports at all, which would have left
+// TypeScript treating it as a global script and colliding with
+// verifyRoles.ts over `failures`, `checks`, and `BASE` — an `export {}` kept
+// it a module. Importing installVerifyBypass below now does that job too.
+import { installVerifyBypass } from './verifyBypass';
+
+// Installs the X-Verify-Bypass header on every fetch() this process makes,
+// once, before any request goes out — see verifyBypass.ts and the matching
+// comment in verifyRoles.ts. Unset VERIFY_BYPASS_TOKEN means this run is
+// subject to the real rate limits.
+installVerifyBypass();
 
 const failures: string[] = [];
 let checks = 0;
@@ -35,13 +42,6 @@ function summary(): void {
 
 const BASE = process.env.VERIFY_BASE_URL ?? 'http://localhost:3000/api';
 
-// Every harness request carries this header; see the matching comment in
-// verifyRoles.ts. Unset means this run is subject to the real rate limits.
-const VERIFY_BYPASS_TOKEN = process.env.VERIFY_BYPASS_TOKEN;
-const BYPASS_HEADERS: Record<string, string> = VERIFY_BYPASS_TOKEN
-  ? { 'X-Verify-Bypass': VERIFY_BYPASS_TOKEN }
-  : {};
-
 /** A real 1x1 transparent PNG, so uploads exercise the same path a browser would. */
 const TINY_PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
@@ -62,7 +62,7 @@ async function login(
 ): Promise<{ token: string; personId: string | null }> {
   const res = await fetch(`${BASE}/auth/login`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...BYPASS_HEADERS },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username, password }),
   });
   const body = (await res.json()) as {
@@ -80,7 +80,7 @@ async function request(
 ): Promise<{ status: number; json: Record<string, unknown> }> {
   const res = await fetch(`${BASE}${path}`, {
     method,
-    headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...BYPASS_HEADERS },
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
   let json: Record<string, unknown> = {};
   try {
@@ -106,7 +106,7 @@ async function uploadSignature(
   );
   const res = await fetch(`${BASE}/persons/${personId}/signature`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, ...BYPASS_HEADERS },
+    headers: { Authorization: `Bearer ${token}` },
     body: form,
   });
   let json: Record<string, unknown> = {};
@@ -124,7 +124,7 @@ async function fetchSignature(
   personId: string
 ): Promise<{ status: number; contentType: string | null; bytes: number }> {
   const res = await fetch(`${BASE}/persons/${personId}/signature`, {
-    headers: { Authorization: `Bearer ${token}`, ...BYPASS_HEADERS },
+    headers: { Authorization: `Bearer ${token}` },
   });
   const buf = res.ok ? Buffer.from(await res.arrayBuffer()) : Buffer.alloc(0);
   return { status: res.status, contentType: res.headers.get('content-type'), bytes: buf.length };

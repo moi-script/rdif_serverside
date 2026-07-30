@@ -6,6 +6,13 @@
  * Run with: npm run verify:gates
  */
 import { detectImageType } from '../utils/imageType';
+import { installVerifyBypass } from './verifyBypass';
+
+// Installs the X-Verify-Bypass header on every fetch() this process makes,
+// once, before any request goes out — see verifyBypass.ts and the matching
+// comment in verifyRoles.ts. Unset VERIFY_BYPASS_TOKEN means this run is
+// subject to the real rate limits.
+installVerifyBypass();
 
 const failures: string[] = [];
 let checks = 0;
@@ -41,13 +48,6 @@ const TEXT = Buffer.from('this is not an image at all, not even close');
 
 const BASE = process.env.VERIFY_BASE_URL ?? 'http://localhost:3000/api';
 
-// Every harness request carries this header; see the matching comment in
-// verifyRoles.ts. Unset means this run is subject to the real rate limits.
-const VERIFY_BYPASS_TOKEN = process.env.VERIFY_BYPASS_TOKEN;
-const BYPASS_HEADERS: Record<string, string> = VERIFY_BYPASS_TOKEN
-  ? { 'X-Verify-Bypass': VERIFY_BYPASS_TOKEN }
-  : {};
-
 // Must match scanService.dateKey(), which buckets attendance by the SERVER'S
 // LOCAL calendar date. toISOString() would give the UTC date, which differs
 // from the local date for part of every day in any non-UTC timezone and makes
@@ -62,7 +62,7 @@ function localDateKey(d: Date): string {
 async function login(username: string, password: string): Promise<string> {
   const res = await fetch(`${BASE}/auth/login`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...BYPASS_HEADERS },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username, password }),
   });
   const body = (await res.json()) as { data?: { accessToken?: string } };
@@ -82,7 +82,6 @@ async function request(
     headers: {
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
-      ...BYPASS_HEADERS,
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
@@ -134,7 +133,7 @@ async function uploadPhoto(
   form.append('photo', new Blob([bytes as unknown as BlobPart], { type: declaredMime }), filename);
   const res = await fetch(`${BASE}/persons/${personId}/photo`, {
     method: 'POST',
-    headers: { ...headers, ...BYPASS_HEADERS },
+    headers,
     body: form,
   });
   let json: Record<string, unknown> = {};
@@ -174,7 +173,7 @@ async function main(): Promise<void> {
   const superadmin = await login('testadmin', 'Admin@123');
   const registrar = await login('testregistrar', 'Registrar@123');
   const student = await login('2025-0001', 'Student@123');
-  const auth = (t: string) => ({ Authorization: `Bearer ${t}`, ...BYPASS_HEADERS });
+  const auth = (t: string) => ({ Authorization: `Bearer ${t}` });
 
   // Juan Dela Cruz — seeded by seed:test.
   const juan = await findPersonByIdNumber(superadmin, '2025-0001');
@@ -231,7 +230,7 @@ async function main(): Promise<void> {
     'nosniff'
   );
 
-  const noCred = await fetch(`${BASE}/persons/${personId}/photo`, { headers: BYPASS_HEADERS });
+  const noCred = await fetch(`${BASE}/persons/${personId}/photo`);
   expectEqual('photo requires a credential', noCred.status, 401);
 
   console.log('\n== photo ownership ==');
@@ -369,7 +368,6 @@ async function main(): Promise<void> {
   const gateKey = (h: string) => ({
     'X-Gate-Key': h,
     'Content-Type': 'application/json',
-    ...BYPASS_HEADERS,
   });
 
   async function tap(
@@ -575,7 +573,7 @@ async function main(): Promise<void> {
   console.log('\n== photo fetch by a gate terminal ==');
   await uploadPhoto(auth(registrar), personId, TINY_JPEG, 'gate.jpg', 'image/jpeg');
   const byGate = await fetch(`${BASE}/persons/${personId}/photo`, {
-    headers: { 'X-Gate-Key': secondKey, ...BYPASS_HEADERS },
+    headers: { 'X-Gate-Key': secondKey },
   });
   expectEqual('gate key may fetch a photo', byGate.status, 200);
   await request(superadmin, 'DELETE', `/persons/${personId}/photo`);
