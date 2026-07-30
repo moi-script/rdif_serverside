@@ -17,6 +17,7 @@ import {
   personDomain,
   type Role,
 } from '../constants/roles';
+import { assertCanActOn, assertCanCreateRole, assertCanWrite, type Actor } from '../utils/authority';
 
 const BASE = process.env.VERIFY_BASE_URL ?? 'http://localhost:3000/api';
 
@@ -176,6 +177,44 @@ async function main(): Promise<void> {
   expectEqual('staff-side has four roles', STAFF_SIDE.length, 4);
   expectEqual('oss is staff-side', STAFF_SIDE.includes(ROLES.OSS as Role), true);
   expectEqual('student is not staff-side', STAFF_SIDE.includes(ROLES.STUDENT as Role), false);
+
+  console.log('\n== authority guards ==');
+
+  /** True when fn throws; used so a guard that silently permits fails the check. */
+  function denies(fn: () => void): boolean {
+    try {
+      fn();
+      return false;
+    } catch {
+      return true;
+    }
+  }
+
+  const superActor: Actor = { id: 'aaaaaaaaaaaaaaaaaaaaaaaa', role: ROLES.SUPERADMIN };
+  const hrActor: Actor = { id: 'bbbbbbbbbbbbbbbbbbbbbbbb', role: ROLES.HR };
+
+  // assertCanActOn — rank
+  expectEqual('superadmin may act on hr', denies(() => assertCanActOn(superActor, { _id: 'cccccccccccccccccccccccc', role: ROLES.HR })), false);
+  expectEqual('superadmin may not act on a peer superadmin', denies(() => assertCanActOn(superActor, { _id: 'cccccccccccccccccccccccc', role: ROLES.SUPERADMIN })), true);
+  expectEqual('hr may act on a student', denies(() => assertCanActOn(hrActor, { _id: 'cccccccccccccccccccccccc', role: ROLES.STUDENT })), false);
+  expectEqual('hr may not act on a peer registrar', denies(() => assertCanActOn(hrActor, { _id: 'cccccccccccccccccccccccc', role: ROLES.REGISTRAR })), true);
+  expectEqual('hr may not act on a superadmin', denies(() => assertCanActOn(hrActor, { _id: 'cccccccccccccccccccccccc', role: ROLES.SUPERADMIN })), true);
+  expectEqual('nobody may act on themselves', denies(() => assertCanActOn(superActor, { _id: superActor.id, role: ROLES.STUDENT })), true);
+
+  // assertCanCreateRole — the hole a target-based check cannot see
+  expectEqual('superadmin may create hr', denies(() => assertCanCreateRole(superActor, ROLES.HR)), false);
+  expectEqual('superadmin may NOT create a superadmin', denies(() => assertCanCreateRole(superActor, ROLES.SUPERADMIN)), true);
+  expectEqual('hr may create a student', denies(() => assertCanCreateRole(hrActor, ROLES.STUDENT)), false);
+  expectEqual('hr may NOT create a peer hr', denies(() => assertCanCreateRole(hrActor, ROLES.HR)), true);
+  expectEqual('hr may NOT create a registrar', denies(() => assertCanCreateRole(hrActor, ROLES.REGISTRAR)), true);
+
+  // assertCanWrite — domain
+  expectEqual('hr may write staff persons', denies(() => assertCanWrite(hrActor, 'person:staff')), false);
+  expectEqual('hr may NOT write student persons', denies(() => assertCanWrite(hrActor, 'person:student')), true);
+  expectEqual('hr may NOT write vehicles', denies(() => assertCanWrite(hrActor, 'vehicle')), true);
+  expectEqual('oss may write vehicles', denies(() => assertCanWrite({ id: 'dddddddddddddddddddddddd', role: ROLES.OSS }, 'vehicle')), false);
+  expectEqual('oss may NOT write persons', denies(() => assertCanWrite({ id: 'dddddddddddddddddddddddd', role: ROLES.OSS }, 'person:student')), true);
+  expectEqual('superadmin may write every domain', denies(() => { assertCanWrite(superActor, 'person:student'); assertCanWrite(superActor, 'vehicle'); assertCanWrite(superActor, 'gadget'); }), false);
 
   const superadminLogin = await login('testadmin', 'Admin@123');
   const registrarLogin = await login('testregistrar', 'Registrar@123');
