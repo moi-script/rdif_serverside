@@ -6,6 +6,7 @@
  * Run with: npm run verify:roles
  */
 
+import { Types } from 'mongoose';
 import {
   ROLES,
   ALL_ROLES,
@@ -200,6 +201,23 @@ async function main(): Promise<void> {
   expectEqual('hr may not act on a peer registrar', denies(() => assertCanActOn(hrActor, { _id: 'cccccccccccccccccccccccc', role: ROLES.REGISTRAR })), true);
   expectEqual('hr may not act on a superadmin', denies(() => assertCanActOn(hrActor, { _id: 'cccccccccccccccccccccccc', role: ROLES.SUPERADMIN })), true);
   expectEqual('nobody may act on themselves', denies(() => assertCanActOn(superActor, { _id: superActor.id, role: ROLES.STUDENT })), true);
+
+  // The self-check compares String(target._id) against actor.id because in
+  // production the target's _id is an ObjectId and the actor's id is a string.
+  // A raw === would compare object to string, always be false, and silently
+  // let anyone act on their own account. String fixtures cannot catch that
+  // regression, so exercise it with a real ObjectId.
+  const selfOid = new Types.ObjectId();
+  expectEqual(
+    'self-targeting is denied when _id is a real ObjectId',
+    denies(() => assertCanActOn({ id: selfOid.toString(), role: ROLES.SUPERADMIN }, { _id: selfOid, role: ROLES.STUDENT })),
+    true
+  );
+  expectEqual(
+    'a DIFFERENT ObjectId is not treated as self',
+    denies(() => assertCanActOn({ id: new Types.ObjectId().toString(), role: ROLES.SUPERADMIN }, { _id: selfOid, role: ROLES.STUDENT })),
+    false
+  );
 
   // assertCanCreateRole — the hole a target-based check cannot see
   expectEqual('superadmin may create hr', denies(() => assertCanCreateRole(superActor, ROLES.HR)), false);
