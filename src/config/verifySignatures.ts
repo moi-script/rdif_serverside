@@ -132,6 +132,8 @@ async function main(): Promise<void> {
   const otherStudent = await login('2025-0002', 'Student@123');
   const staff = await login('EMP-1001', 'Staff@123');
   const registrar = await login('testregistrar', 'Registrar@123');
+  const hr = await login('testhr', 'Hr@12345');
+  const oss = await login('testoss', 'Oss@12345');
 
   if (!student.personId || !otherStudent.personId || !staff.personId) {
     throw new Error('test seed accounts are not linked to persons — run npm run seed:test');
@@ -217,6 +219,63 @@ async function main(): Promise<void> {
   expectEqual(
     'registrar reads that signature',
     (await fetchSignature(registrar.token, otherId)).status,
+    200
+  );
+
+  console.log('\n== write authority is scoped, not just STAFF_SIDE membership ==');
+  // OSS has zero person write domains (WRITE_DOMAINS.oss is vehicle/gadget
+  // only). STAFF_SIDE membership alone must not be enough to reach a write —
+  // that was the regression: it let OSS overwrite or delete anyone's stored
+  // signature.
+  expectEqual(
+    'OSS cannot upload a signature for any person',
+    (await uploadSignature(oss.token, studentId, TINY_PNG, 'sig.png', 'image/png')).status,
+    403
+  );
+  expectEqual(
+    'OSS cannot delete a signature for any person',
+    (await request(oss.token, 'DELETE', `/persons/${studentId}/signature`)).status,
+    403
+  );
+  expectEqual(
+    "student's signature survives OSS's denied attempts",
+    (await fetchSignature(student.token, studentId)).status,
+    200
+  );
+
+  // Registrar's write domain is person:student only — a staff Person is out
+  // of reach even though registrar is STAFF_SIDE and may read it.
+  expectEqual(
+    "registrar cannot upload a staff person's signature",
+    (await uploadSignature(registrar.token, staffId, TINY_PNG, 'sig.png', 'image/png')).status,
+    403
+  );
+  expectEqual(
+    "registrar cannot delete a staff person's signature",
+    (await request(registrar.token, 'DELETE', `/persons/${staffId}/signature`)).status,
+    403
+  );
+
+  // HR's write domain is person:staff + person:employee — a student Person is
+  // out of reach.
+  expectEqual(
+    "HR cannot upload a student's signature",
+    (await uploadSignature(hr.token, studentId, TINY_PNG, 'sig.png', 'image/png')).status,
+    403
+  );
+  expectEqual(
+    "HR cannot delete a student's signature",
+    (await request(hr.token, 'DELETE', `/persons/${studentId}/signature`)).status,
+    403
+  );
+
+  // HR IS in-domain for a staff person — the legitimate write still works;
+  // this guard scopes writes, it does not blanket-deny them.
+  const hrInDomain = await uploadSignature(hr.token, staffId, TINY_PNG, 'sig.png', 'image/png');
+  expectEqual('HR uploads a staff signature (in domain)', hrInDomain.status, 201);
+  expectEqual(
+    'staff signature still reads back after HR overwrite',
+    (await fetchSignature(staff.token, staffId)).status,
     200
   );
 

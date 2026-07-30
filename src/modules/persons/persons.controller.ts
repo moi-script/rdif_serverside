@@ -80,12 +80,12 @@ export const personController = {
 
   uploadSignature: asyncHandler(async (req: Request, res: Response) => {
     if (!req.user) throw new ApiError('UNAUTHORIZED');
-    const actor = { role: req.user.role, personId: req.user.personId };
+    const actor = { id: req.user.userId, role: req.user.role, personId: req.user.personId };
     sendSuccess(res, await personSignatureService.upload(req.params.id, actor, req.file), 201);
   }),
   getSignature: asyncHandler(async (req: Request, res: Response) => {
     if (!req.user) throw new ApiError('UNAUTHORIZED');
-    const actor = { role: req.user.role, personId: req.user.personId };
+    const actor = { id: req.user.userId, role: req.user.role, personId: req.user.personId };
     const signature = await personSignatureService.get(req.params.id, actor);
     const etag = `W/"${signature.updatedAt.getTime()}-${signature.byte_size}"`;
     if (req.headers['if-none-match'] === etag) {
@@ -100,7 +100,7 @@ export const personController = {
   }),
   deleteSignature: asyncHandler(async (req: Request, res: Response) => {
     if (!req.user) throw new ApiError('UNAUTHORIZED');
-    const actor = { role: req.user.role, personId: req.user.personId };
+    const actor = { id: req.user.userId, role: req.user.role, personId: req.user.personId };
     sendSuccess(res, await personSignatureService.remove(req.params.id, actor));
   }),
 };
