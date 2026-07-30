@@ -1,3 +1,5 @@
+import { ApiError } from '../utils/ApiError';
+
 export const ROLES = {
   SUPERADMIN: 'superadmin',
   REGISTRAR: 'registrar',
@@ -50,8 +52,20 @@ export const STAFF_SIDE: readonly Role[] = [
   ROLES.OSS,
 ];
 
+/**
+ * A bare `RANK[role]` lookup returns `undefined` for a role the table does
+ * not recognize, and every rank guard compares with `>=` — `undefined >= n`
+ * is `false`, so an unrecognized role would silently PASS every rank check
+ * instead of failing it. `actor.role` is a JWT claim that is never
+ * enum-validated on the way in, so this must fail closed rather than trust
+ * the table lookup to always hit.
+ */
 export function rankOf(role: Role): 1 | 2 | 3 {
-  return RANK[role];
+  const rank = RANK[role];
+  if (rank === undefined) {
+    throw new ApiError('FORBIDDEN', `Unrecognized role '${String(role)}'`);
+  }
+  return rank;
 }
 
 /**

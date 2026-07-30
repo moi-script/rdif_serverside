@@ -80,9 +80,16 @@ export function assertCanCreateRole(actor: Actor, role: Role): void {
   }
 }
 
-/** May `actor` write records of this class? */
+/**
+ * May `actor` write records of this class?
+ *
+ * `WRITE_DOMAINS[actor.role]` is `undefined` for a role the table does not
+ * recognize, and `undefined.includes(...)` throws a raw TypeError — which
+ * surfaces to the client as a 500, not the 403 an authorization failure
+ * should be. `?? []` makes an unrecognized role deny every domain instead.
+ */
 export function assertCanWrite(actor: Actor, domain: Domain): void {
-  if (!WRITE_DOMAINS[actor.role].includes(domain)) {
+  if (!(WRITE_DOMAINS[actor.role] ?? []).includes(domain)) {
     throw new ApiError('FORBIDDEN', `Your role cannot modify ${domain} records`);
   }
 }
