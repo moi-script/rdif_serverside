@@ -292,6 +292,33 @@ async function runChecks(): Promise<void> {
   expectEqual('oss may NOT write persons', denies(() => assertCanWrite({ id: 'dddddddddddddddddddddddd', role: ROLES.OSS }, 'person:student')), true);
   expectEqual('superadmin may write every domain', denies(() => { assertCanWrite(superActor, 'person:student'); assertCanWrite(superActor, 'vehicle'); assertCanWrite(superActor, 'gadget'); }), false);
 
+  // Fail-closed on an unrecognized role. `actor.role` is a JWT claim, never
+  // enum-validated on the way in, so a bogus value must deny on every guard
+  // rather than pass because `RANK[role]`/`WRITE_DOMAINS[role]` came back
+  // `undefined`. The cast is deliberate: this value can never come from
+  // TypeScript's own type system, only from a forged or corrupted token.
+  const bogusActor: Actor = { id: 'eeeeeeeeeeeeeeeeeeeeeeee', role: 'ghost' as Role };
+  expectEqual(
+    'assertCanActOn denies an unrecognized actor role',
+    denies(() => assertCanActOn(bogusActor, { _id: 'cccccccccccccccccccccccc', role: ROLES.STUDENT })),
+    true
+  );
+  expectEqual(
+    'assertCanActOn denies an unrecognized target role',
+    denies(() => assertCanActOn(superActor, { _id: 'cccccccccccccccccccccccc', role: 'ghost' as Role })),
+    true
+  );
+  expectEqual(
+    'assertCanCreateRole denies an unrecognized actor role',
+    denies(() => assertCanCreateRole(bogusActor, ROLES.STUDENT)),
+    true
+  );
+  expectEqual(
+    'assertCanWrite denies an unrecognized actor role',
+    denies(() => assertCanWrite(bogusActor, 'person:student')),
+    true
+  );
+
   const superadminLogin = await login('testadmin', 'Admin@123');
   const registrarLogin = await login('testregistrar', 'Registrar@123');
   const studentLogin = await login('2025-0001', 'Student@123');
@@ -1338,6 +1365,50 @@ async function runChecks(): Promise<void> {
   expectEqual('meta exposes a total', typeof logsMeta?.pagination?.total, 'number');
   expectEqual('meta exposes a truncated flag', typeof logsMeta?.truncated, 'boolean');
 
+  // I5: from=to=<today> must include a tap made today. This assertion is
+  // able to fail: `new Date("YYYY-MM-DD")` parses as UTC midnight, so in any
+  // timezone ahead of UTC the query's $lte boundary lands hours before the
+  // tap's local timestamp and today's own rows silently vanish from the
+  // response — the exact defect being guarded against.
+  const dateCheckGates = await request(superadmin, 'GET', '/gates');
+  const dateCheckGateList = (dateCheckGates.json.data ?? []) as {
+    _id?: string;
+    id?: string;
+    name: string;
+  }[];
+  const dateCheckGate = dateCheckGateList.find((g) => g.name === 'Main Entrance');
+  const dateCheckGateId = (dateCheckGate?._id ?? dateCheckGate?.id) as string;
+  expectEqual('a gate exists for the date-filter probe tap', Boolean(dateCheckGateId), true);
+
+  const dateCheckTap = await request(superadmin, 'POST', '/scan/tap', {
+    rfid_uid: 'A1B2C3D4',
+    gate_id: dateCheckGateId,
+    direction: 'exit',
+  });
+  expectEqual('date-filter probe tap responds 200', dateCheckTap.status, OK);
+  const dateCheckTapData = dateCheckTap.json.data as { scan_time?: string } | undefined;
+  expectEqual('date-filter probe tap is logged', typeof dateCheckTapData?.scan_time, 'string');
+
+  const todayLocal = (() => {
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  })();
+  const todayLogs = await request(
+    superadmin,
+    'GET',
+    `/logs?from=${todayLocal}&to=${todayLocal}&limit=200`
+  );
+  expectEqual('from=to=today responds 200', todayLogs.status, OK);
+  const todayRows = (todayLogs.json.data ?? []) as { scan_time: string }[];
+  expectEqual(
+    'from=to=today returns rows made today (local-day range, not UTC-cut)',
+    todayRows.length > 0,
+    true
+  );
+
   // access_result filter must actually filter.
   const deniedOnly = await request(superadmin, 'GET', '/logs?access_result=denied&limit=50');
   const deniedRows = (deniedOnly.json.data as { access_result: string }[]) ?? [];
@@ -1382,7 +1453,22 @@ async function runChecks(): Promise<void> {
  * report for a proposal on what a cheap automated guard could look like.
  */
 const PROBE_PERSON_ID_PREFIXES = ['verify-rbac-', 'verify-del-'];
-const PROBE_USER_USERNAME_PREFIXES = ['verify-stu-', 'verify-reg2-', 'verify-del-'];
+const PROBE_USER_USERNAME_PREFIXES = [
+  'verify-stu-',
+  'verify-reg2-',
+  'verify-del-',
+  // Expected-403 probes below (registrar/hr/oss trying to mint a peer or a
+  // superadmin) never create a row on the pass path, which is exactly why
+  // this list previously omitted them — but the run that matters most is
+  // the one where the guard under test REGRESSES: the POST that should have
+  // been denied instead succeeds, and now the account it names is real and
+  // stays real, live, at `superadmin` in `rbac-peer-super`'s case. Cleanup
+  // must cover the failure path, not just the path where everything already
+  // worked.
+  'verify-reg-', // registrar POSTs a would-be registrar/superadmin login
+  'verify-sa-',  // registrar POSTs a would-be superadmin login
+  'rbac-', // rbac-peer-hr, rbac-peer-reg, rbac-peer-super, rbac-api-super, rbac-oss-login, rbac-no-such-user
+];
 const PROBE_VEHICLE_PLATE_PREFIXES = ['RBAC-'];
 
 /**
