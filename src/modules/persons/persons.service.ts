@@ -4,7 +4,7 @@ import { IPerson } from './persons.model';
 import { ApiError } from '../../utils/ApiError';
 import { getPagination, buildMeta } from '../../utils/pagination';
 import { ROLES, personDomain } from '../../constants/roles';
-import { Actor, assertCanWrite } from '../../utils/authority';
+import { Actor, assertCanWrite, assertCanActOn } from '../../utils/authority';
 import { userRepo } from '../users/users.repository';
 
 interface ListQuery {
@@ -140,6 +140,17 @@ export const personService = {
     // dead and hidden from the Accounts list (buildFilter excludes
     // deleted_at). Only a superadmin may reverse that; anyone else needs to
     // go through a superadmin, who can restore the User first.
+    //
+    // A merely-deactivated (not deleted) login also needs a rank check, not
+    // just a domain check. HR and OSS logins can be person-backed too — only
+    // the seeded office accounts happen to be person-less — so without this,
+    // an HR account could reactivate a *peer* HR account's Person here even
+    // though PATCH /users/:id/status would deny that same actor for
+    // assertCanActOn's peer/self rule. Deferring to assertCanActOn whenever a
+    // linked User exists makes this route produce the exact same outcome as
+    // the /users route the actor would otherwise have to use, closing that
+    // gap while leaving every legitimate reactivation of a subordinate's
+    // account working.
     if (data.status === 'active' && actor.role !== ROLES.SUPERADMIN) {
       const linkedUser = await userRepo.findByPersonId(id);
       if (linkedUser?.deleted_at) {
@@ -147,6 +158,9 @@ export const personService = {
           'FORBIDDEN',
           "This person's account was deleted by an administrator; ask a superadmin to restore it."
         );
+      }
+      if (linkedUser && !linkedUser.is_active) {
+        assertCanActOn(actor, linkedUser);
       }
     }
 

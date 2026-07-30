@@ -1289,6 +1289,87 @@ async function runChecks(): Promise<void> {
     hr, 'PATCH', `/persons/${probeStudent!._id}/status`, FORBIDDEN, { status: 'inactive' }
   );
 
+  console.log('\n== reactivation defers to rank when a linked User exists (regression counterexample) ==');
+
+  // The old special case only refused reactivation when the linked User was
+  // soft-deleted (deleted_at set). That misses a real hole: HR and OSS logins
+  // can be person-backed too — userService.create permits exactly that, and
+  // only the SEEDED office accounts (testhr/testoss) happen to be
+  // person-less. So a merely-deactivated (is_active: false, NOT deleted)
+  // person-backed HR account was reachable through PATCH /persons/:id/status
+  // by any OTHER HR account, even though that same actor would be denied on
+  // the equivalent PATCH /users/:id/status by assertCanActOn's peer rule.
+  // Build exactly that account and prove the gap is closed: a peer gets 403,
+  // a superadmin still succeeds.
+  const reactStamp = Date.now();
+  const reactPersonIdNumber = `verify-rbac-hr2-${reactStamp}`; // prefix: PROBE_PERSON_ID_PREFIXES ('verify-rbac-')
+  const reactRfid = 'FEED' + (reactStamp % 0xffff).toString(16).toUpperCase().padStart(4, '0');
+
+  const reactPersonRes = await request(superadmin, 'POST', '/persons', {
+    full_name: 'RBAC Reactivation Probe',
+    type: 'staff',
+    id_number: reactPersonIdNumber,
+    department_section: 'HR Office',
+    rfid_uid: reactRfid,
+  });
+  expectEqual('person-backed probe person created', reactPersonRes.status, 201);
+  const reactPersonId = idOf(reactPersonRes);
+  expectEqual('probe person has an id', reactPersonId.length > 0, true);
+
+  const reactUsername = `rbac-hr2-${reactStamp}`; // prefix: PROBE_USER_USERNAME_PREFIXES ('rbac-')
+  const reactUserRes = await request(superadmin, 'POST', '/users', {
+    username: reactUsername,
+    password: 'Verify@12345',
+    role: 'hr',
+    person_id: reactPersonId,
+  });
+  expectEqual('superadmin creates a person-backed hr account (rank-2)', reactUserRes.status, 201);
+  const reactUserId = (reactUserRes.json.data as { id?: string } | undefined)?.id;
+  expectEqual('probe hr account has an id', typeof reactUserId, 'string');
+
+  // Superadmin deactivates it through the normal route — this is what
+  // deactivating a colleague's login actually looks like, and it closes the
+  // gate as a side effect.
+  await check(
+    'superadmin deactivates the person-backed hr account',
+    superadmin, 'PATCH', `/users/${reactUserId}/status`, OK, { active: false }
+  );
+  const reactAfterOff = await request(superadmin, 'GET', `/persons/${reactPersonId}`);
+  expectEqual(
+    'linked person went inactive with the login',
+    (reactAfterOff.json.data as { status?: string } | undefined)?.status,
+    'inactive'
+  );
+
+  // The counterexample itself: a DIFFERENT, peer-rank hr account (the seeded
+  // testhr) must be denied here. Before this fix, assertCanWrite(hr,
+  // 'person:staff') passed and the deleted_at-only check never fired, so this
+  // reopened the gate — something that same actor could not do through
+  // PATCH /users/:id/status.
+  await check(
+    'a peer hr account cannot reactivate it via PATCH /persons/:id/status',
+    hr, 'PATCH', `/persons/${reactPersonId}/status`, FORBIDDEN, { status: 'active' }
+  );
+  const reactAfterPeerAttempt = await request(superadmin, 'GET', `/persons/${reactPersonId}`);
+  expectEqual(
+    'the denied peer attempt left the card inactive',
+    (reactAfterPeerAttempt.json.data as { status?: string } | undefined)?.status,
+    'inactive'
+  );
+
+  // Superadmin's short-circuit still works — this is a legitimate
+  // reactivation, identical in outcome to PATCH /users/:id/status {active:true}.
+  await check(
+    'superadmin can still reactivate it',
+    superadmin, 'PATCH', `/persons/${reactPersonId}/status`, OK, { status: 'active' }
+  );
+  const reactAfterSuperadmin = await request(superadmin, 'GET', `/persons/${reactPersonId}`);
+  expectEqual(
+    'card reactivated by superadmin',
+    (reactAfterSuperadmin.json.data as { status?: string } | undefined)?.status,
+    'active'
+  );
+
   console.log('\n== vehicle write domain ==');
 
   await check('hr GET /vehicles', hr, 'GET', '/vehicles', OK);
