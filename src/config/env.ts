@@ -25,6 +25,14 @@ const envSchema = z.object({
     .string()
     .regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'OCCUPANCY_RESET_TIME must be HH:MM (24-hour)')
     .default('23:00'),
+  // Validated at startup for the same reason OCCUPANCY_RESET_TIME is: a
+  // malformed value here silently becomes an Invalid Date, and this one decides
+  // whether a vehicle pass opens a barrier. Failing closed at boot beats silent
+  // corruption.
+  SCHOOL_YEAR_END_MMDD: z
+    .string()
+    .regex(/^(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/, 'SCHOOL_YEAR_END_MMDD must be MM-DD')
+    .default('03-31'),
   // Opt-out for the verification harnesses only — see
   // shouldBypassRateLimit() in middlewares/rateLimiter.ts for the fail-closed
   // guard. Optional and undefined by default; must never be set in production.

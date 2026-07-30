@@ -20,6 +20,7 @@ import {
 } from '../constants/roles';
 import { assertCanActOn, assertCanCreateRole, assertCanWrite, type Actor } from '../utils/authority';
 import { shouldBypassRateLimit } from '../middlewares/rateLimiter';
+import { nextSchoolYearEnd } from '../utils/schoolYear';
 import { installVerifyBypass } from './verifyBypass';
 import { connectDB, disconnectDB } from './db';
 import { PersonModel } from '../modules/persons/persons.model';
@@ -222,6 +223,29 @@ async function runChecks(): Promise<void> {
     shouldBypassRateLimit(false, 'tok', 'tok'),
     true
   );
+
+  console.log('\n== school-year expiry helper ==');
+
+  // Default is 03-31. A date before it in the same year resolves to this year.
+  const beforeCutoff = nextSchoolYearEnd(new Date(2026, 6, 27)); // 2026-07-27 local
+  expectEqual('expiry lands on the configured month', beforeCutoff.getMonth(), 2); // March
+  expectEqual('expiry lands on the configured day', beforeCutoff.getDate(), 31);
+  expectEqual('a July date rolls to next year', beforeCutoff.getFullYear(), 2027);
+
+  // A date after the cutoff rolls forward a further year.
+  const afterCutoff = nextSchoolYearEnd(new Date(2027, 4, 2)); // 2027-05-02 local
+  expectEqual('a May date rolls to the following year', afterCutoff.getFullYear(), 2028);
+
+  // Exactly ON the cutoff day is still valid that day — end-of-day, not midnight.
+  const onCutoff = nextSchoolYearEnd(new Date(2027, 2, 31, 9, 0, 0));
+  expectEqual('the cutoff day itself does not roll over', onCutoff.getFullYear(), 2027);
+  expectEqual('expiry is end-of-day, not midnight', onCutoff.getHours(), 23);
+  expectEqual('expiry minutes are end-of-day', onCutoff.getMinutes(), 59);
+
+  // Local, never UTC: constructed from local components, so the local date
+  // components round-trip regardless of the host timezone.
+  const local = nextSchoolYearEnd(new Date(2026, 6, 27));
+  expectEqual('expiry is built from local components', local.getDate(), 31);
 
   console.log('\n== rank and domain tables ==');
 

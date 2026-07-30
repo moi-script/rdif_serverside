@@ -44,6 +44,7 @@ node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | Seed admin credentials |
 | `LOGIN_RATE_LIMIT_MAX` | Max `/auth/login` requests per 15 min (default `10`). `npm run verify:roles` makes 8 login calls per run, so running it twice in a row needs at least `20`. |
 | `OCCUPANCY_RESET_TIME` | Nightly cutoff (`HH:MM`, default `23:00`) after which a card still marked inside is treated as outside. Prevents a missed exit tap from locking someone out the next morning. |
+| `SCHOOL_YEAR_END_MMDD` | Vehicle pass expiry cutoff (`MM-DD`, default `03-31`), interpreted in the server's local timezone. A malformed value stops the server at startup rather than silently becoming an Invalid Date. |
 | `VERIFY_BYPASS_TOKEN` | Optional, unset by default. Lets the `verify:*` harnesses run back to back at production rate limits instead of tripping them (see the "429s during a verify run" entry below). `shouldBypassRateLimit()` in `src/middlewares/rateLimiter.ts` only honours it when `NODE_ENV` is not `production`, so it is inert in a production configuration regardless of whether it happens to be set — but it must never be set on a production host anyway. **Never set it in production.** |
 
 ## Scripts
@@ -190,6 +191,15 @@ expectations from the same local clock it is testing, so a wrong host
 timezone shifts both sides together. Deployments MUST either set
 `TZ=Asia/Manila` (or the correct campus timezone) or knowingly accept that
 window — do not leave a UTC host on the default.
+
+The same bug class applies to `SCHOOL_YEAR_END_MMDD` (default `03-31`).
+`nextSchoolYearEnd()` in `src/utils/schoolYear.ts` builds the expiry date from
+local `Date` components — never `toISOString()` or `Date.UTC` — so a vehicle
+pass stays valid through the end of the local calendar day it expires on,
+matching how `isLate()` and `lastResetBoundary()` bucket by the server's local
+clock. A malformed value fails closed at startup (see `env.ts`) rather than
+silently becoming an Invalid Date that would let every pass expire immediately
+or never.
 
 ## Data model
 
