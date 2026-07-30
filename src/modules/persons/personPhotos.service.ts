@@ -3,7 +3,8 @@ import { personPhotoRepo } from './personPhotos.repository';
 import { PersonModel } from './persons.model';
 import { detectImageType } from '../../utils/imageType';
 import { ApiError } from '../../utils/ApiError';
-import { ROLES, Role } from '../../constants/roles';
+import { Role, STAFF_SIDE, personDomain } from '../../constants/roles';
+import { Actor, assertCanWrite } from '../../utils/authority';
 
 const INTERNAL_PHOTO_URL = (id: string) => `/persons/${id}/photo`;
 
@@ -12,12 +13,13 @@ function assertValidId(id: string): void {
 }
 
 export const personPhotoService = {
-  async upload(personId: string, file: Express.Multer.File | undefined) {
+  async upload(personId: string, actor: Actor, file: Express.Multer.File | undefined) {
     assertValidId(personId);
     if (!file) throw new ApiError('VALIDATION_ERROR', 'No photo uploaded (field name: photo)');
 
     const person = await PersonModel.findById(personId);
     if (!person) throw new ApiError('NOT_FOUND', 'Person not found');
+    assertCanWrite(actor, personDomain(person.type));
 
     // The declared Content-Type is ignored; only the bytes decide.
     const mime = detectImageType(file.buffer);
@@ -40,7 +42,7 @@ export const personPhotoService = {
     assertValidId(personId);
 
     if (actor) {
-      const privileged = actor.role === ROLES.SUPERADMIN || actor.role === ROLES.REGISTRAR;
+      const privileged = STAFF_SIDE.includes(actor.role);
       // 404 rather than 403: a 403 confirms the photo exists, which lets an
       // unauthorized caller enumerate which person ids have photos.
       if (!privileged && actor.personId !== personId) {
@@ -53,10 +55,11 @@ export const personPhotoService = {
     return photo;
   },
 
-  async remove(personId: string) {
+  async remove(personId: string, actor: Actor) {
     assertValidId(personId);
     const person = await PersonModel.findById(personId);
     if (!person) throw new ApiError('NOT_FOUND', 'Person not found');
+    assertCanWrite(actor, personDomain(person.type));
 
     await personPhotoRepo.deleteByPersonId(personId);
 

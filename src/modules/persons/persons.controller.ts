@@ -51,7 +51,7 @@ export const personController = {
     sendSuccess(res, await personService.reassignRfid(req.params.id, req.body.rfid_uid, actorOf(req)));
   }),
   uploadPhoto: asyncHandler(async (req: Request, res: Response) => {
-    sendSuccess(res, await personPhotoService.upload(req.params.id, req.file), 201);
+    sendSuccess(res, await personPhotoService.upload(req.params.id, actorOf(req), req.file), 201);
   }),
   getPhoto: asyncHandler(async (req: Request, res: Response) => {
     // A gate terminal authenticates by device key and has no req.user; it is
@@ -75,7 +75,7 @@ export const personController = {
     res.status(200).send(photo.data);
   }),
   deletePhoto: asyncHandler(async (req: Request, res: Response) => {
-    sendSuccess(res, await personPhotoService.remove(req.params.id));
+    sendSuccess(res, await personPhotoService.remove(req.params.id, actorOf(req)));
   }),
 
   uploadSignature: asyncHandler(async (req: Request, res: Response) => {
