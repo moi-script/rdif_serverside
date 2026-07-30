@@ -3,7 +3,7 @@ import { personSignatureRepo } from './personSignatures.repository';
 import { PersonModel } from './persons.model';
 import { detectImageType } from '../../utils/imageType';
 import { ApiError } from '../../utils/ApiError';
-import { ROLES, Role } from '../../constants/roles';
+import { Role, STAFF_SIDE } from '../../constants/roles';
 
 const INTERNAL_SIGNATURE_URL = (id: string) => `/persons/${id}/signature`;
 
@@ -26,7 +26,7 @@ function assertValidId(id: string): void {
  * signature on file.
  */
 function assertMayManage(actor: SignatureActor, personId: string): void {
-  const privileged = actor.role === ROLES.SUPERADMIN || actor.role === ROLES.REGISTRAR;
+  const privileged = STAFF_SIDE.includes(actor.role);
   if (privileged) return;
   if (actor.personId === personId) return;
   throw new ApiError('NOT_FOUND', 'No signature on file');
