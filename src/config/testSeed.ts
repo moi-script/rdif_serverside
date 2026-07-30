@@ -409,6 +409,50 @@ async function seedTest(): Promise<void> {
     );
   }
 
+  // ---- Rank-2 office accounts, with no person_id: these are office logins, not
+  // people. Each writes only its own domain; all of them read the whole
+  // directory. See docs/superpowers/specs/2026-07-30-rbac-v2-design.md.
+  const HARDCODED_HR = { username: 'testhr', password: 'Hr@12345' };
+  const HARDCODED_OSS = { username: 'testoss', password: 'Oss@12345' };
+
+  for (const [account, role] of [
+    [HARDCODED_HR, ROLES.HR],
+    [HARDCODED_OSS, ROLES.OSS],
+  ] as const) {
+    const existing = await UserModel.findOne({ username: account.username });
+    if (existing) {
+      console.log(`[test-seed] ${account.username} already exists — skipping`);
+    } else {
+      await UserModel.create({
+        username: account.username,
+        password_hash: await bcrypt.hash(account.password, 12),
+        role,
+        person_id: null,
+        must_change_password: false,
+        is_active: true,
+      });
+      console.log(`[test-seed] created ${account.username} (${role})`);
+    }
+  }
+
+  // A staff person in HR's domain, so the harness has a cross-domain target the
+  // registrar must be denied on. Without a staff Person, "registrar cannot write
+  // staff" would pass against an empty collection for the wrong reason.
+  const existingBea = await PersonModel.findOne({ id_number: 'EMP-1002' });
+  if (!existingBea) {
+    await PersonModel.create({
+      full_name: 'Bea Ramos',
+      type: 'staff',
+      id_number: 'EMP-1002',
+      department_section: 'Registrar Office',
+      rfid_uid: 'C9D0E1F2',
+      status: 'active',
+    });
+    console.log('[test-seed] created staff person EMP-1002');
+  } else {
+    console.log('[test-seed] staff person EMP-1002 already exists — skipping');
+  }
+
   // ---- Clean up legacy student logins from the earlier seed ----
   const removed = await UserModel.deleteMany({ username: { $in: LEGACY_STUDENT_USERNAMES } });
   if (removed.deletedCount) {

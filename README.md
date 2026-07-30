@@ -42,7 +42,7 @@ node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
 | `API_PREFIX` | Route prefix (default `/api`) |
 | `ALLOWED_ORIGINS` | Comma-separated CORS origins (e.g. `http://localhost:5173`) |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | Seed admin credentials |
-| `LOGIN_RATE_LIMIT_MAX` | Max `/auth/login` requests per 15 min (default `10`). `npm run verify:roles` makes 6 login calls per run, so running it twice in a row needs at least `20`. |
+| `LOGIN_RATE_LIMIT_MAX` | Max `/auth/login` requests per 15 min (default `10`). `npm run verify:roles` makes 8 login calls per run, so running it twice in a row needs at least `20`. |
 | `OCCUPANCY_RESET_TIME` | Nightly cutoff (`HH:MM`, default `23:00`) after which a card still marked inside is treated as outside. Prevents a missed exit tap from locking someone out the next morning. |
 
 ## Scripts
@@ -81,21 +81,34 @@ node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
   server serving taps mid-rebuild admits everyone, since every card looks
   like a first entry. Take the gate offline for the rebuild window, or accept
   that every tap during it is treated as a fresh entry.
+- **A `verify:*` run reports 429s, or `verify:passback` dies with
+  `TypeError: Cannot read properties of undefined (reading 'find')`.** The run
+  hit `globalLimiter` (`RATE_LIMIT_MAX`, default 200, per
+  `RATE_LIMIT_WINDOW_MS`, default 60s), which applies to every API route.
+  Running all four harnesses back to back exceeds it. This is **not** the login
+  limiter — raising `LOGIN_RATE_LIMIT_MAX` does not help. Run the harnesses one
+  at a time, leaving a window between them, or raise `RATE_LIMIT_MAX` for a
+  verification run and restore it afterwards.
 
 ## Test accounts (`npm run seed:test`)
 
-For the testing phase, `seed:test` inserts a hardcoded superadmin, a registrar, three
-students, and one staff member. Each student/staff person is a `Person` (profile + RFID)
-linked to a `User` login whose **username is the student/employee number**.
+For the testing phase, `seed:test` inserts a hardcoded superadmin, a registrar, two
+rank-2 office accounts (HR, OSS), three students, and two staff members. Each
+student/staff person is a `Person` (profile + RFID) linked to a `User` login whose
+**username is the student/employee number**. The HR and OSS accounts have no linked
+`Person` — they are office logins, not people.
 
 | Role | Username | Password |
 |------|----------|----------|
 | Superadmin | `testadmin` | `Admin@123` |
 | Registrar | `testregistrar` | `Registrar@123` |
+| HR | `testhr` | `Hr@12345` |
+| OSS | `testoss` | `Oss@12345` |
 | Student — Juan Dela Cruz | `2025-0001` | `Student@123` |
 | Student — Maria Santos | `2025-0002` | `Student@123` |
 | Student — Pedro Reyes | `2025-0003` | `Student@123` |
 | Staff — Ana Villanueva | `EMP-1001` | `Staff@123` |
+| Staff — Bea Ramos | `EMP-1002` | *(no login — Person only, for cross-domain checks)* |
 
 > Demo credentials for local testing only.
 

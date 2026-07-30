@@ -84,6 +84,17 @@ async function check(
     console.log(`  FAIL ${name} — 401, expected ${expected}`);
     return;
   }
+  // A 429 is neither a pass nor a denial — it means the run hit a rate limit
+  // and this check never reached the authorization code. Running all four
+  // verify:* scripts back to back trips globalLimiter (RATE_LIMIT_MAX per
+  // RATE_LIMIT_WINDOW_MS, applied to every API route, NOT the login limiter),
+  // and a run that silently reports a wrong status here looks like a code
+  // defect. Say what actually happened.
+  if (status === 429 && expected !== 429) {
+    failures.push(`${name}: got 429 (rate limited — see README) — expected ${expected}`);
+    console.log(`  FAIL ${name} — 429 rate limited, expected ${expected}`);
+    return;
+  }
   if (status !== expected) {
     failures.push(`${name}: got ${status}, expected ${expected}`);
     console.log(`  FAIL ${name} — ${status}, expected ${expected}`);
@@ -244,11 +255,23 @@ async function main(): Promise<void> {
   const student = studentLogin.token;
   const staff = staffLogin.token;
 
+  const hrLogin = await login('testhr', 'Hr@12345');
+  const ossLogin = await login('testoss', 'Oss@12345');
+  const hr = hrLogin.token;
+  const oss = ossLogin.token;
+  // hr/oss are not yet exercised by any check() call in this task — they are
+  // wired up here so Tasks 4-8's HTTP checks can consume them without
+  // touching the login block again.
+  void hr;
+  void oss;
+
   console.log('\n== seeded accounts carry the expected roles ==');
   expectEqual('testadmin is superadmin', superadminLogin.role, 'superadmin');
   expectEqual('testregistrar is registrar', registrarLogin.role, 'registrar');
   expectEqual('2025-0001 is student', studentLogin.role, 'student');
   expectEqual('EMP-1001 is staff', staffLogin.role, 'staff');
+  expectEqual('testhr has role hr', hrLogin.role, 'hr');
+  expectEqual('testoss has role oss', ossLogin.role, 'oss');
 
   console.log('\n== persons: superadmin and registrar may read ==');
   for (const [name, token] of [
