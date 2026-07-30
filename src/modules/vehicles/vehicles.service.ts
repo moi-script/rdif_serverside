@@ -3,6 +3,7 @@ import { vehicleRepo } from './vehicles.repository';
 import { IVehicle } from './vehicles.model';
 import { ApiError } from '../../utils/ApiError';
 import { getPagination, buildMeta } from '../../utils/pagination';
+import { Actor, assertCanWrite } from '../../utils/authority';
 
 interface ListQuery {
   page?: string;
@@ -25,19 +26,22 @@ export const vehicleService = {
     if (!v) throw new ApiError('NOT_FOUND', 'Vehicle not found');
     return v;
   },
-  async create(data: Partial<IVehicle>) {
+  async create(data: Partial<IVehicle>, actor: Actor) {
+    assertCanWrite(actor, 'vehicle');
     const existingOwner = await vehicleRepo.findByOwner(String(data.owner_person_id));
     if (existingOwner) throw new ApiError('DUPLICATE_PLATE', 'Owner already has a vehicle');
     const existingRfid = await vehicleRepo.findByRfid(String(data.rfid_uid));
     if (existingRfid) throw new ApiError('DUPLICATE_RFID');
     return vehicleRepo.create(data);
   },
-  async update(id: string, data: Partial<IVehicle>) {
+  async update(id: string, data: Partial<IVehicle>, actor: Actor) {
+    assertCanWrite(actor, 'vehicle');
     const updated = await vehicleRepo.updateById(id, data);
     if (!updated) throw new ApiError('NOT_FOUND', 'Vehicle not found');
     return updated;
   },
-  async setStatus(id: string, status: 'active' | 'inactive') {
-    return this.update(id, { status });
+  async setStatus(id: string, status: 'active' | 'inactive', actor: Actor) {
+    assertCanWrite(actor, 'vehicle');
+    return this.update(id, { status }, actor);
   },
 };

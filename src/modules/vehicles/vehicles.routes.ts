@@ -8,7 +8,14 @@ import { createVehicleSchema, updateVehicleSchema, vehicleStatusSchema } from '.
 
 export const vehicleRoutes = Router();
 
-vehicleRoutes.use(authenticate, authorize(ROLES.SUPERADMIN));
+// Reads are shared across the staff-side console; writes are OSS-only, enforced
+// in the service by assertCanWrite('vehicle'). This deliberately reverses
+// "Vehicles stay superadmin-only" from the role-system spec: vehicle
+// registration is the OSS office's whole purpose.
+vehicleRoutes.use(
+  authenticate,
+  authorize(ROLES.SUPERADMIN, ROLES.REGISTRAR, ROLES.HR, ROLES.OSS)
+);
 vehicleRoutes.get('/', vehicleController.list);
 vehicleRoutes.get('/:id', vehicleController.get);
 vehicleRoutes.post('/', validate(createVehicleSchema), vehicleController.create);

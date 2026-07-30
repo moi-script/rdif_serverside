@@ -284,7 +284,10 @@ async function main(): Promise<void> {
   }
 
   console.log('\n== superadmin-only areas ==');
-  for (const path of ['/logs', '/reports/attendance', '/scan/logs', '/vehicles']) {
+  // Vehicles used to live in this loop, but reads are now shared across the
+  // staff-side console (see "vehicle write domain" below) — only /logs,
+  // /reports/attendance, and /scan/logs are still superadmin-only.
+  for (const path of ['/logs', '/reports/attendance', '/scan/logs']) {
     await check(`superadmin GET ${path}`, superadmin, 'GET', path, OK);
     await check(`registrar GET ${path} denied`, registrar, 'GET', path, FORBIDDEN);
     await check(`student GET ${path} denied`, student, 'GET', path, FORBIDDEN);
@@ -1160,6 +1163,54 @@ async function main(): Promise<void> {
   await check(
     'hr may NOT deactivate a student person',
     hr, 'PATCH', `/persons/${probeStudent!._id}/status`, FORBIDDEN, { status: 'inactive' }
+  );
+
+  console.log('\n== vehicle write domain ==');
+
+  await check('hr GET /vehicles', hr, 'GET', '/vehicles', OK);
+  await check('oss GET /vehicles', oss, 'GET', '/vehicles', OK);
+  await check('student GET /vehicles denied', student, 'GET', '/vehicles', FORBIDDEN);
+
+  // Vehicle.owner_person_id is UNIQUE and there is NO DELETE /vehicles/:id
+  // route, so a probe vehicle cannot be cleaned up and cannot reuse an owner
+  // that already has one. Create a fresh throwaway owner per run instead —
+  // same convention as the person probes in Task 5.
+  const vStamp = Date.now();
+  const vSuffix = (vStamp % 0xffff).toString(16).toUpperCase().padStart(4, '0');
+  const ownerRes = await request(superadmin, 'POST', '/persons', {
+    full_name: 'RBAC Vehicle Owner', type: 'student',
+    id_number: `verify-rbac-v-${vStamp}`, department_section: 'BSIT 4-A',
+    rfid_uid: 'FACE' + vSuffix,
+  });
+  expectEqual('throwaway vehicle owner created', ownerRes.status, 201);
+  const ownerData = ownerRes.json.data as { _id?: string; id?: string } | undefined;
+  const ownerId = String(ownerData?._id ?? ownerData?.id ?? '');
+  expectEqual('throwaway owner has an id', ownerId.length > 0, true);
+
+  const vehicleBody = {
+    owner_person_id: ownerId,
+    plate_number: `RBAC-${vSuffix}`,
+    rfid_uid: 'D0E1' + vSuffix,
+    vehicle_type: 'Motorcycle',
+    vehicle_model: 'Honda Adv',
+  };
+
+  await check('registrar may NOT create a vehicle', registrar, 'POST', '/vehicles', FORBIDDEN, vehicleBody);
+  await check('hr may NOT create a vehicle', hr, 'POST', '/vehicles', FORBIDDEN, vehicleBody);
+
+  const created = await request(oss, 'POST', '/vehicles', vehicleBody);
+  expectEqual('oss may create a vehicle', created.status, 201);
+  const vData = created.json.data as { _id?: string; id?: string } | undefined;
+  const vehicleId = String(vData?._id ?? vData?.id ?? '');
+  expectEqual('created vehicle has an id', vehicleId.length > 0, true);
+
+  await check(
+    'oss may deactivate its own vehicle',
+    oss, 'PATCH', `/vehicles/${vehicleId}/status`, OK, { status: 'inactive' }
+  );
+  await check(
+    'hr may NOT change vehicle status',
+    hr, 'PATCH', `/vehicles/${vehicleId}/status`, FORBIDDEN, { status: 'active' }
   );
 
   summary();
