@@ -19,6 +19,9 @@ import {
   type Role,
 } from '../constants/roles';
 import { assertCanActOn, assertCanCreateRole, assertCanWrite, type Actor } from '../utils/authority';
+import { connectDB, disconnectDB } from './db';
+import { PersonModel } from '../modules/persons/persons.model';
+import { UserModel } from '../modules/users/users.model';
 
 const BASE = process.env.VERIFY_BASE_URL ?? 'http://localhost:3000/api';
 
@@ -63,6 +66,48 @@ async function request(
     // Some responses have no body; the status is what matters.
   }
   return { status: res.status, json };
+}
+
+interface UserRow {
+  id: string;
+  username: string;
+  role: string;
+  is_active: boolean;
+  deactivated_at: string | null;
+  person: {
+    id: string;
+    full_name: string;
+    type: string;
+    department_section: string;
+    rfid_uid: string | null;
+    status: string;
+  } | null;
+}
+
+/**
+ * GET /users caps `limit` at 100 server-side (see utils/pagination.ts), and
+ * there is no server-side search by username. A single-page fetch used to
+ * assume a seeded fixture (e.g. the prod-seeded 'admin' account) would land
+ * on page 1 — sorted newest-first, that assumption breaks the moment enough
+ * OTHER accounts sort ahead of it, and the lookup then reports "not found"
+ * for a row that is sitting one page further down. Walk every page instead
+ * of trusting page 1, so growth in the collection can never produce a wrong
+ * answer here — only a slower one.
+ */
+async function fetchAllUsers(token: string, query = ''): Promise<UserRow[]> {
+  const rows: UserRow[] = [];
+  let page = 1;
+  for (;;) {
+    const qs = query ? `${query}&page=${page}&limit=100` : `page=${page}&limit=100`;
+    const res = await request(token, 'GET', `/users?${qs}`);
+    const pageRows = (res.json.data ?? []) as UserRow[];
+    rows.push(...pageRows);
+    const meta = (res.json.meta ?? {}) as { pagination?: { pages?: number } };
+    const pages = meta.pagination?.pages ?? 1;
+    if (pageRows.length === 0 || page >= pages) break;
+    page++;
+  }
+  return rows;
 }
 
 /**
@@ -126,7 +171,7 @@ function summary(): void {
 const OK = 200;
 const FORBIDDEN = 403;
 
-async function main(): Promise<void> {
+async function runChecks(): Promise<void> {
   console.log('\n== rank and domain tables ==');
 
   expectEqual('six roles exist', ALL_ROLES.length, 6);
@@ -393,13 +438,10 @@ async function main(): Promise<void> {
   expectEqual('created student has role student', madeStudent?.role, 'student');
 
   console.log('\n== users list carries person data and filters ==');
-  const listRes = await request(superadmin, 'GET', '/users?limit=100');
-  const listRows = (listRes.json.data ?? []) as {
-    username: string;
-    role: string;
-    is_active: boolean;
-    person: { full_name: string; type: string; department_section: string } | null;
-  }[];
+  // Fixture lookups: walk every page (fetchAllUsers) rather than trusting
+  // page 1 — see the comment on fetchAllUsers for why a single-page fetch is
+  // not safe here.
+  const listRows = await fetchAllUsers(superadmin);
 
   const juan = listRows.find((u) => u.username === '2025-0001');
   expectEqual('list joins person name', juan?.person?.full_name, 'Juan Dela Cruz');
@@ -433,21 +475,25 @@ async function main(): Promise<void> {
 
   console.log('\n== single-user activate / deactivate ==');
 
-  // Find Juan's user id and person id via the joined list.
-  const forStatus = await request(superadmin, 'GET', '/users?limit=100');
-  const statusRows = (forStatus.json.data ?? []) as {
-    id: string;
-    username: string;
-    role: string;
-    person: { id: string; status: string } | null;
-  }[];
+  // Find Juan's user id and person id via the joined list. Walk every page —
+  // these are seeded fixtures, not this run's own fresh rows, so they are
+  // exactly the kind of lookup that can silently land past page 1.
+  const statusRows = await fetchAllUsers(superadmin);
   const juanRow = statusRows.find((u) => u.username === '2025-0001');
-  if (!juanRow?.person) throw new Error('seed missing: student 2025-0001 with a person');
+  if (!juanRow?.person) {
+    throw new Error(
+      `seed missing: searched all ${statusRows.length} accounts for username '2025-0001' with a linked person — run npm run seed:test`
+    );
+  }
   const juanUserId = juanRow.id;
   const selfRow = statusRows.find((u) => u.username === 'testadmin');
-  if (!selfRow) throw new Error('seed missing: testadmin');
+  if (!selfRow) {
+    throw new Error(`seed missing: searched all ${statusRows.length} accounts for username 'testadmin'`);
+  }
   const empStaffRow = statusRows.find((u) => u.username === 'EMP-1001');
-  if (!empStaffRow) throw new Error('seed missing: staff EMP-1001');
+  if (!empStaffRow) {
+    throw new Error(`seed missing: searched all ${statusRows.length} accounts for username 'EMP-1001'`);
+  }
 
   // The route now admits every staff-side role (STAFF_SIDE_GUARD), so a bare
   // "only superadmin" denial no longer holds. Registrar outranks staff
@@ -550,10 +596,17 @@ async function main(): Promise<void> {
   // expected. Use the prod-seeded 'admin' account as the target (not
   // 'testadmin', which is the account we are authenticated as — that would
   // conflate this with the self-action check above).
-  const forAdminTarget = await request(superadmin, 'GET', '/users?limit=100');
-  const adminRows = (forAdminTarget.json.data ?? []) as { id: string; username: string }[];
+  // This is exactly the lookup that broke in practice: enough accumulated
+  // probe accounts (sorted newest-first) pushed the prod-seeded 'admin'
+  // account past a single 100-row page, and a page-1-only fetch reported it
+  // as missing even though it existed. Walk every page instead.
+  const adminRows = await fetchAllUsers(superadmin);
   const otherSuperadminRow = adminRows.find((u) => u.username === 'admin');
-  if (!otherSuperadminRow) throw new Error("seed missing: prod-seeded superadmin 'admin'");
+  if (!otherSuperadminRow) {
+    throw new Error(
+      `seed missing: searched all ${adminRows.length} accounts for the prod-seeded superadmin username 'admin'`
+    );
+  }
   const otherSuperadminId = otherSuperadminRow.id;
 
   await check(
@@ -948,10 +1001,11 @@ async function main(): Promise<void> {
   await check('hr GET /users', hr, 'GET', '/users', OK);
   await check('oss GET /users', oss, 'GET', '/users', OK);
 
-  // Rank on status changes. Resolve the registrar's own user id first.
-  const rankUserList = await request(superadmin, 'GET', '/users?limit=100');
-  const rankUserRows =
-    (rankUserList.json.data as { id: string; role: string; username: string; person: unknown }[]) ?? [];
+  // Rank on status changes. Resolve the registrar's own user id first. This
+  // array is scanned repeatedly below for several seeded usernames/roles
+  // (including a bare `.find(...)!` for 'superadmin' with no presence check),
+  // so it is fetched via fetchAllUsers rather than a single page.
+  const rankUserRows = await fetchAllUsers(superadmin);
   expectEqual('user list is non-empty', rankUserRows.length > 0, true);
   const registrarRow = rankUserRows.find((u) => u.role === 'registrar');
   // Must be a PERSON-BACKED student, not one of the person-less accounts this
@@ -1212,7 +1266,82 @@ async function main(): Promise<void> {
     'hr may NOT change vehicle status',
     hr, 'PATCH', `/vehicles/${vehicleId}/status`, FORBIDDEN, { status: 'active' }
   );
+}
 
+/**
+ * Prefixes this harness uses for the probe Person/User records it creates.
+ * There is deliberately no `DELETE /persons/:id` route (see the module
+ * comment above the "person write domains" section), so cleanup has to go
+ * straight at the database — the same pattern rebuildOccupancy.ts uses for
+ * config-script DB access. Every prefix here was found by grepping this file
+ * for the literal strings passed as `id_number`/`username`, not guessed:
+ *   - Person.id_number: 'verify-rbac-' (student/staff/vehicle-owner probes),
+ *     'verify-del-' (the deletion-test throwaway, left 'inactive' rather
+ *     than removed by DELETE /users/:id).
+ *   - User.username: 'verify-stu-' and 'verify-reg2-' (created and never
+ *     touched again), 'verify-del-' (soft-deleted by DELETE /users/:id,
+ *     which sets deleted_at but does not remove the document).
+ * Matching by prefix — not by this run's own stamp — means a run also mops
+ * up any litter left by earlier, pre-fix runs, and it is structurally unable
+ * to touch a seeded fixture: no seeded username or id_number starts with any
+ * of these prefixes.
+ */
+const PROBE_PERSON_ID_PREFIXES = ['verify-rbac-', 'verify-del-'];
+const PROBE_USER_USERNAME_PREFIXES = ['verify-stu-', 'verify-reg2-', 'verify-del-'];
+
+/**
+ * Removes every Person/User row this harness has ever created (this run's
+ * and any earlier run's), so the collections stop growing. Must run even
+ * when `runChecks()` throws or logs failures — see the try/finally around
+ * its call in `main()` — but must never itself change the process exit code;
+ * `summary()` is what decides pass/fail, and it runs after this, untouched.
+ */
+async function cleanupProbes(): Promise<void> {
+  console.log('\n== cleanup: removing probe records this harness created ==');
+  await connectDB();
+  try {
+    const personRegex = new RegExp(`^(${PROBE_PERSON_ID_PREFIXES.join('|')})`);
+    const userRegex = new RegExp(`^(${PROBE_USER_USERNAME_PREFIXES.join('|')})`);
+
+    const personResult = await PersonModel.deleteMany({ id_number: { $regex: personRegex } });
+    const userResult = await UserModel.deleteMany({ username: { $regex: userRegex } });
+
+    console.log(
+      `  removed ${personResult.deletedCount} probe person(s) (id_number matching ${PROBE_PERSON_ID_PREFIXES.join(', ')})`
+    );
+    console.log(
+      `  removed ${userResult.deletedCount} probe user(s) (username matching ${PROBE_USER_USERNAME_PREFIXES.join(', ')})`
+    );
+  } finally {
+    await disconnectDB();
+  }
+}
+
+/**
+ * Cleanup must run whether runChecks() throws, logs soft failures, or passes
+ * cleanly — a red run must never leak probe records. The try/finally is what
+ * guarantees that: `finally` runs on every exit path out of the `try`,
+ * including a thrown error, before that error propagates.
+ *
+ * Exit-code correctness is the other half of the contract. `summary()` is
+ * the ONLY thing allowed to decide the process exit code (via its
+ * `process.exit(1)` on failure), and it must run strictly after cleanup so
+ * a red run's non-zero exit is never skipped:
+ *   - runChecks() throws  -> finally cleans up -> the throw re-propagates
+ *     past summary() (never called) -> caught below -> process.exit(1).
+ *   - runChecks() returns with soft failures logged -> finally cleans up ->
+ *     summary() runs and calls process.exit(1) itself.
+ *   - runChecks() returns clean -> finally cleans up -> summary() prints the
+ *     pass message and returns -> normal exit 0.
+ * Nothing in cleanupProbes() calls process.exit or swallows an error, so it
+ * cannot mask a failure in either direction.
+ */
+async function main(): Promise<void> {
+  try {
+    await runChecks();
+  } finally {
+    await cleanupProbes();
+  }
   summary();
 }
 

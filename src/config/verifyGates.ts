@@ -87,6 +87,33 @@ async function request(
   return { status: res.status, json };
 }
 
+/**
+ * Looks up a seeded Person by exact `id_number`, using the `?search=` param
+ * (personService.list matches it against full_name and id_number) instead of
+ * fetching a page and scanning it. GET /persons caps `limit` at 100
+ * server-side (see utils/pagination.ts) with no way to raise it, so a
+ * page-1-only fetch silently reports "not found" for a real row sitting past
+ * page 1 once the collection grows — that is exactly what broke this script
+ * against an un-cleaned-up verify:roles run ("seeded person 2025-0001 not
+ * found" when the person existed, just off-page). `search` is a substring
+ * match, not exact, so results still need an exact-match filter afterward.
+ */
+async function findPersonByIdNumber(
+  token: string,
+  idNumber: string
+): Promise<{ _id: string; id_number: string }> {
+  const res = await request(token, 'GET', `/persons?search=${encodeURIComponent(idNumber)}&limit=100`);
+  const candidates = (res.json.data ?? []) as { _id: string; id_number: string }[];
+  const match = candidates.find((p) => p.id_number === idNumber);
+  if (!match) {
+    throw new Error(
+      `seeded person not found: searched /persons?search=${idNumber} for an exact id_number match ` +
+        `(${candidates.length} candidate(s) returned) — run npm run seed:test`
+    );
+  }
+  return match;
+}
+
 /** Posts a multipart photo. `headers` supplies the credential (Bearer or X-Gate-Key). */
 async function uploadPhoto(
   headers: Record<string, string>,
@@ -142,13 +169,7 @@ async function main(): Promise<void> {
   const auth = (t: string) => ({ Authorization: `Bearer ${t}` });
 
   // Juan Dela Cruz — seeded by seed:test.
-  const list = await request(superadmin, 'GET', '/persons?limit=100');
-  const persons = (list.json.data ?? []) as { _id: string; id_number: string }[];
-  if (persons.length < 4) {
-    throw new Error(`expected at least 4 seeded persons, got ${persons.length}`);
-  }
-  const juan = persons.find((p) => p.id_number === '2025-0001');
-  if (!juan) throw new Error('seeded person 2025-0001 not found — run npm run seed:test');
+  const juan = await findPersonByIdNumber(superadmin, '2025-0001');
   const personId = juan._id;
 
   console.log('\n== photo upload validation ==');
@@ -207,9 +228,11 @@ async function main(): Promise<void> {
 
   console.log('\n== photo ownership ==');
 
-  const maria = persons.find((p) => p.id_number === '2025-0002');
+  const maria = await findPersonByIdNumber(superadmin, '2025-0002');
   // Presence floor: without this, every assertion below would compare
-  // undefined to undefined and pass vacuously.
+  // undefined to undefined and pass vacuously. findPersonByIdNumber already
+  // throws (with a clear "what was searched for" message) rather than
+  // returning undefined, so this is now a belt-and-braces check.
   expectEqual('second seeded person found', !!maria, true);
   const otherId = maria?._id ?? '';
 
