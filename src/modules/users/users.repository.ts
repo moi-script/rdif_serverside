@@ -31,6 +31,13 @@ export const userRepo = {
   create: (data: Partial<IUser>) => UserModel.create(data),
   findByUsername: (username: string) => UserModel.findOne({ username }),
   findById: (id: string) => UserModel.findById(id),
+  /**
+   * Used by personService.update (Critical 2) to check whether a person being
+   * reactivated has a linked login that a superadmin already deleted. Not
+   * scoped to `deleted_at: null` like userRepo.buildFilter's base filter —
+   * this lookup exists specifically to FIND a deleted user, not to exclude one.
+   */
+  findByPersonId: (personId: string) => UserModel.findOne({ person_id: personId }),
   updateById: (id: string, data: Partial<IUser>) =>
     UserModel.findByIdAndUpdate(id, data, { new: true }).select(SAFE_FIELDS).lean(),
 

@@ -3,8 +3,9 @@ import { personRepo } from './persons.repository';
 import { IPerson } from './persons.model';
 import { ApiError } from '../../utils/ApiError';
 import { getPagination, buildMeta } from '../../utils/pagination';
-import { personDomain } from '../../constants/roles';
+import { ROLES, personDomain } from '../../constants/roles';
 import { Actor, assertCanWrite } from '../../utils/authority';
+import { userRepo } from '../users/users.repository';
 
 interface ListQuery {
   page?: string;
@@ -128,6 +129,25 @@ export const personService = {
     assertCanWrite(actor, personDomain(existing.type));
     if (data.type && data.type !== existing.type) {
       assertCanWrite(actor, personDomain(data.type));
+    }
+
+    // A superadmin's DELETE /users/:id soft-deletes the linked login AND sets
+    // this Person's status to 'inactive' in the same action, closing the
+    // gate. assertCanWrite alone does not see that: a registrar/HR account
+    // with ordinary write authority over this person's domain could
+    // otherwise silently reopen the gate — a card whose login the
+    // superadmin killed would work again — while the login itself stays
+    // dead and hidden from the Accounts list (buildFilter excludes
+    // deleted_at). Only a superadmin may reverse that; anyone else needs to
+    // go through a superadmin, who can restore the User first.
+    if (data.status === 'active' && actor.role !== ROLES.SUPERADMIN) {
+      const linkedUser = await userRepo.findByPersonId(id);
+      if (linkedUser?.deleted_at) {
+        throw new ApiError(
+          'FORBIDDEN',
+          "This person's account was deleted by an administrator; ask a superadmin to restore it."
+        );
+      }
     }
 
     const updated = await personRepo.updateById(id, data);
