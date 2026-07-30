@@ -199,7 +199,27 @@ pass stays valid through the end of the local calendar day it expires on,
 matching how `isLate()` and `lastResetBoundary()` bucket by the server's local
 clock. A malformed value fails closed at startup (see `env.ts`) rather than
 silently becoming an Invalid Date that would let every pass expire immediately
-or never.
+or never. Startup validation also rejects a syntactically valid but
+non-existent calendar date (e.g. `02-30`, `04-31`) — the regex alone can't
+catch these because `new Date(year, 1, 30)` doesn't throw, it silently
+normalises to March 2, which is the same silent-corruption failure mode
+through a different door. `02-29` is rejected too: `nextSchoolYearEnd()` has
+no leap-year awareness, so accepting it would let the date silently roll to
+March 1 in three years out of four.
+
+`npm run verify:roles` cannot actually exercise the local-vs-UTC distinction
+above on a host running at UTC+0, because at a zero offset `Date.UTC(...)`
+and local `Date` construction produce the identical instant — a regression to
+UTC would go completely undetected and the harness would report false
+confidence. The harness therefore fails loudly first if it detects a zero
+timezone offset, rather than silently passing checks that prove nothing. This
+is a real risk in practice: most CI runners and default Docker images run
+`TZ=UTC`. Do not "fix" this by setting `TZ` only for the `verify:*` npm
+scripts — several checks in this harness compare dates the server itself
+bucketed, so the harness and the server must keep agreeing on local time, and
+pinning `TZ` for only one side would introduce a mismatch worse than the
+blind spot. Set `TZ=Asia/Manila` (or the correct campus timezone) for the
+whole environment, as already required above for `OCCUPANCY_RESET_TIME`.
 
 ## Data model
 

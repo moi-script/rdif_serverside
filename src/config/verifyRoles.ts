@@ -226,6 +226,23 @@ async function runChecks(): Promise<void> {
 
   console.log('\n== school-year expiry helper ==');
 
+  // These checks compare local-time construction against UTC construction, and
+  // at a zero offset those are the SAME INSTANT — so on a UTC+0 host (the
+  // default for most CI runners and Docker images) this whole block passes
+  // against a UTC-based implementation and proves nothing. Fail loudly rather
+  // than reporting false confidence: the README already requires TZ to be set
+  // to the campus timezone. Do NOT "fix" this by pinning TZ inside the
+  // verify:* npm scripts — several other checks in this harness compare dates
+  // the server itself bucketed, so the harness and the server must keep
+  // agreeing on local time; pinning TZ for only one side would introduce a
+  // mismatch worse than the blind spot it would paper over. A loud failure
+  // here is the correct signal: set TZ for the whole environment.
+  expectEqual(
+    'harness is not running at UTC+0 (timezone checks would be inert)',
+    new Date().getTimezoneOffset() !== 0,
+    true
+  );
+
   // Default is 03-31. A date before it in the same year resolves to this year.
   const beforeCutoff = nextSchoolYearEnd(new Date(2026, 6, 27)); // 2026-07-27 local
   expectEqual('expiry lands on the configured month', beforeCutoff.getMonth(), 2); // March
