@@ -1334,7 +1334,9 @@ async function runChecks(): Promise<void> {
   expectEqual('resolved name is non-empty', (subject?.full_name ?? '').length > 0, true);
 
   expectEqual('rows expose a gate field', 'gate' in personRow!, true);
-  expectEqual('meta exposes a total', typeof (logs.json.meta as { total?: number })?.total, 'number');
+  const logsMeta = logs.json.meta as { pagination?: { total?: number }; truncated?: boolean } | undefined;
+  expectEqual('meta exposes a total', typeof logsMeta?.pagination?.total, 'number');
+  expectEqual('meta exposes a truncated flag', typeof logsMeta?.truncated, 'boolean');
 
   // access_result filter must actually filter.
   const deniedOnly = await request(superadmin, 'GET', '/logs?access_result=denied&limit=50');

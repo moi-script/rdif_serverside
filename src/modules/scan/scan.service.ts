@@ -170,7 +170,7 @@ export const scanService = {
   },
 
   async listLogs(query: Record<string, string | undefined>) {
-    const { getPagination } = await import('../../utils/pagination');
+    const { getPagination, buildMeta } = await import('../../utils/pagination');
     const p = getPagination(query);
 
     const match: Record<string, unknown> = {};
@@ -256,14 +256,15 @@ export const scanService = {
       ScanLogModel.countDocuments(match),
     ]);
 
-    // Flat meta shape (total/page/limit/truncated), not the nested
-    // buildMeta() { pagination: {...} } shape other list endpoints use: the
-    // RecordRow contract for this endpoint (task-8 brief) specifies a flat
-    // `meta.total`, and the harness asserts `typeof meta.total === 'number'`
-    // directly.
+    // truncated sits beside buildMeta()'s pagination rather than replacing
+    // it, so this endpoint's meta shape stays consistent with every other
+    // list endpoint (/api/users, /api/persons, ...). It's added because a
+    // silently truncated list is indistinguishable from a short one: without
+    // it a caller can't tell "these are all the rows" from "there's a next
+    // page".
     return {
       items,
-      meta: { total, page: p.page, limit: p.limit, truncated: total > p.limit },
+      meta: { ...buildMeta(total, p.page, p.limit), truncated: total > p.limit },
     };
   },
 };

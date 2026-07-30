@@ -397,12 +397,13 @@ async function main(): Promise<void> {
   });
   expectEqual('body-supplied gate is ignored, not honoured', spoofed.status, 200);
 
-  // scanRepo.findLogsPaginated sorts scan_time: -1, so [0] is the newest row.
-  // The freshness guard keeps this from passing on some unrelated old row if
-  // that sort ever changes.
+  // scanService.listLogs aggregates and sorts scan_time: -1, so [0] is the
+  // newest row. The freshness guard keeps this from passing on some
+  // unrelated old row if that sort ever changes. The row's gate is now a
+  // resolved { id, name } object (task 8), not a bare gate_id.
   const logs = await request(superadmin, 'GET', '/scan/logs?limit=1');
   const latest = (logs.json.data ?? []) as {
-    gate_id?: string;
+    gate?: { id?: string; name?: string } | null;
     direction?: string;
     scan_time?: string;
   }[];
@@ -413,7 +414,7 @@ async function main(): Promise<void> {
     latest[0]?.scan_time ? Date.now() - new Date(latest[0].scan_time).getTime() < 60_000 : false,
     true
   );
-  expectEqual('log records the key\'s gate, not the body\'s', latest[0]?.gate_id, mainGate._id);
+  expectEqual('log records the key\'s gate, not the body\'s', latest[0]?.gate?.id, mainGate._id);
   expectEqual('log records the gate\'s direction', latest[0]?.direction, 'entry');
 
   // A person card at a vehicle gate must not open the barrier.
