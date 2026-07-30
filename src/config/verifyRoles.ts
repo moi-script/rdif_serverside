@@ -23,6 +23,7 @@ import { connectDB, disconnectDB } from './db';
 import { PersonModel } from '../modules/persons/persons.model';
 import { UserModel } from '../modules/users/users.model';
 import { VehicleModel } from '../modules/vehicles/vehicles.model';
+import { grantSuperadmin } from './grantSuperadmin';
 
 const BASE = process.env.VERIFY_BASE_URL ?? 'http://localhost:3000/api';
 
@@ -1006,6 +1007,28 @@ async function runChecks(): Promise<void> {
     username: 'rbac-peer-super', password: 'Verify@12345', role: 'superadmin',
   });
 
+  console.log('\n== break-glass promotion ==');
+
+  // The API must never mint a superadmin, whoever asks.
+  await check('api refuses to create a superadmin', superadmin, 'POST', '/users', FORBIDDEN, {
+    username: 'rbac-api-super', password: 'Verify@12345', role: 'superadmin',
+  });
+
+  // Promotion is idempotent and refuses unknown usernames. Run against the
+  // account that is ALREADY superadmin so the harness leaves no new privileged
+  // account behind — promoting testadmin is a no-op by construction.
+  const promoted = await grantSuperadmin('testadmin');
+  expectEqual('promoting an existing superadmin is a no-op', promoted.promoted, false);
+  expectEqual('promotion reports the username', promoted.username, 'testadmin');
+
+  let rejectedUnknown = false;
+  try {
+    await grantSuperadmin('rbac-no-such-user');
+  } catch {
+    rejectedUnknown = true;
+  }
+  expectEqual('promotion refuses an unknown username', rejectedUnknown, true);
+
   // Widened reads.
   await check('hr GET /users', hr, 'GET', '/users', OK);
   await check('oss GET /users', oss, 'GET', '/users', OK);
@@ -1334,28 +1357,30 @@ const PROBE_VEHICLE_PLATE_PREFIXES = ['RBAC-'];
  */
 async function cleanupProbes(): Promise<void> {
   console.log('\n== cleanup: removing probe records this harness created ==');
-  await connectDB();
-  try {
-    const vehicleRegex = new RegExp(`^(${PROBE_VEHICLE_PLATE_PREFIXES.join('|')})`);
-    const personRegex = new RegExp(`^(${PROBE_PERSON_ID_PREFIXES.join('|')})`);
-    const userRegex = new RegExp(`^(${PROBE_USER_USERNAME_PREFIXES.join('|')})`);
+  // Connection lifecycle is owned by main() (connectDB()/disconnectDB() wrap
+  // both runChecks() and this call) rather than opened and closed here,
+  // because runChecks() now needs a live connection too — grantSuperadmin()
+  // reads/writes UserModel directly, not over HTTP like the rest of the
+  // harness. Connecting only once per run also means this function's own
+  // deleteMany calls below share that same connection instead of racing a
+  // second connect/disconnect pair around it.
+  const vehicleRegex = new RegExp(`^(${PROBE_VEHICLE_PLATE_PREFIXES.join('|')})`);
+  const personRegex = new RegExp(`^(${PROBE_PERSON_ID_PREFIXES.join('|')})`);
+  const userRegex = new RegExp(`^(${PROBE_USER_USERNAME_PREFIXES.join('|')})`);
 
-    const vehicleResult = await VehicleModel.deleteMany({ plate_number: { $regex: vehicleRegex } });
-    const personResult = await PersonModel.deleteMany({ id_number: { $regex: personRegex } });
-    const userResult = await UserModel.deleteMany({ username: { $regex: userRegex } });
+  const vehicleResult = await VehicleModel.deleteMany({ plate_number: { $regex: vehicleRegex } });
+  const personResult = await PersonModel.deleteMany({ id_number: { $regex: personRegex } });
+  const userResult = await UserModel.deleteMany({ username: { $regex: userRegex } });
 
-    console.log(
-      `  removed ${vehicleResult.deletedCount} probe vehicle(s) (plate_number matching ${PROBE_VEHICLE_PLATE_PREFIXES.join(', ')})`
-    );
-    console.log(
-      `  removed ${personResult.deletedCount} probe person(s) (id_number matching ${PROBE_PERSON_ID_PREFIXES.join(', ')})`
-    );
-    console.log(
-      `  removed ${userResult.deletedCount} probe user(s) (username matching ${PROBE_USER_USERNAME_PREFIXES.join(', ')})`
-    );
-  } finally {
-    await disconnectDB();
-  }
+  console.log(
+    `  removed ${vehicleResult.deletedCount} probe vehicle(s) (plate_number matching ${PROBE_VEHICLE_PLATE_PREFIXES.join(', ')})`
+  );
+  console.log(
+    `  removed ${personResult.deletedCount} probe person(s) (id_number matching ${PROBE_PERSON_ID_PREFIXES.join(', ')})`
+  );
+  console.log(
+    `  removed ${userResult.deletedCount} probe user(s) (username matching ${PROBE_USER_USERNAME_PREFIXES.join(', ')})`
+  );
 }
 
 /**
@@ -1378,12 +1403,22 @@ async function cleanupProbes(): Promise<void> {
  * cannot mask a failure in either direction.
  */
 async function main(): Promise<void> {
+  // Connect once, up front: runChecks() now calls grantSuperadmin() directly
+  // (not over HTTP), which reads/writes UserModel and needs a live mongoose
+  // connection before that call runs, not just during cleanupProbes() at the
+  // end. Disconnect happens in the outer finally so it still runs on every
+  // exit path, same guarantee as before.
+  await connectDB();
   try {
-    await runChecks();
+    try {
+      await runChecks();
+    } finally {
+      await cleanupProbes();
+    }
+    summary();
   } finally {
-    await cleanupProbes();
+    await disconnectDB();
   }
-  summary();
 }
 
 main().catch((err) => {

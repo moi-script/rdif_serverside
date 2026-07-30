@@ -9,6 +9,7 @@
     "seed": "ts-node src/config/seed.ts",
     "seed:test": "ts-node src/config/testSeed.ts",
     "rebuild:occupancy": "ts-node src/config/rebuildOccupancy.ts",
+    "grant:superadmin": "ts-node src/config/grantSuperadmin.ts",
     "verify:roles": "ts-node src/config/verifyRoles.ts",
     "verify:gates": "ts-node src/config/verifyGates.ts",
     "verify:signatures": "ts-node src/config/verifySignatures.ts",

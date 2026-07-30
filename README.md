@@ -59,6 +59,19 @@ node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
   it from `scan_logs`. It self-heals within the same run, but do not run it
   against a live campus mid-day.
 - `npm run rebuild:occupancy` — reconcile occupancy state from `scan_logs`
+- `npm run grant:superadmin -- <username>` — break-glass promotion of an
+  existing account to `superadmin`. `POST /users { role: 'superadmin' }` is
+  403 for everyone, superadmins included (`assertCanCreateRole` denies
+  creating a peer or higher rank) — the API can **never** mint a superadmin.
+  This script is the only path by which one can come to exist, which is why
+  it deliberately lives outside the API: it requires shell access to the
+  server (and therefore `.env`/`MONGODB_URI` access), not just a logged-in
+  session. No argument prints a usage message and exits 1; an unknown
+  username exits 1 with an error naming what it looked for; promoting an
+  account that is already a superadmin is a no-op that exits 0. Keep this
+  script available (and `ADMIN_PASSWORD` deleted from production `.env`
+  after the first seed, per the note at the bottom of this file) — without
+  it, a lost superadmin password is unrecoverable.
 
 ### Troubleshooting
 
