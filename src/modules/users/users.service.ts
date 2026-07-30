@@ -4,7 +4,7 @@ import { userRepo, UserListQuery } from './users.repository';
 import { IUser, UserModel } from './users.model';
 import { ApiError } from '../../utils/ApiError';
 import { getPagination, buildMeta } from '../../utils/pagination';
-import { ROLES, Role, BULK_PROTECTED } from '../../constants/roles';
+import { Role, rolesBelow } from '../../constants/roles';
 import { personRepo } from '../persons/persons.repository';
 import { PersonModel } from '../persons/persons.model';
 
@@ -30,9 +30,13 @@ export const userService = {
   },
 
   async create(input: CreateUserInput, actorRole: Role) {
-    // A registrar registers people; only a superadmin mints privileged accounts.
-    if (actorRole !== ROLES.SUPERADMIN && BULK_PROTECTED.includes(input.role)) {
-      throw new ApiError('FORBIDDEN', 'Only a superadmin can create privileged accounts');
+    // Never create an account at or above your own authority level. On create
+    // there is no target row, so the rule applies to the REQUESTED role.
+    if (!rolesBelow(actorRole).includes(input.role)) {
+      throw new ApiError(
+        'FORBIDDEN',
+        'You cannot create an account at or above your own authority level'
+      );
     }
 
     const existing = await userRepo.findByUsername(input.username);
@@ -165,14 +169,16 @@ export const userService = {
    * minus the actor. Exclusions are applied here — server-side — so a crafted
    * request cannot reach a superadmin or registrar account.
    */
-  async resolveBulkTargets(query: UserListQuery, actorUserId: string) {
+  async resolveBulkTargets(query: UserListQuery, actorUserId: string, actorRole: Role) {
     const base = await userRepo.buildFilter(query);
     const candidates = await UserModel.find(base).select('_id role').lean();
+
+    const below = rolesBelow(actorRole);
 
     const targets: string[] = [];
     let excluded = 0;
     for (const c of candidates) {
-      const isProtected = BULK_PROTECTED.includes(c.role as Role);
+      const isProtected = !below.includes(c.role as Role);
       const isSelf = String(c._id) === actorUserId;
       if (isProtected || isSelf) {
         excluded++;
@@ -183,8 +189,8 @@ export const userService = {
     return { targets, excluded };
   },
 
-  async bulkPreview(query: UserListQuery, actorUserId: string) {
-    const { targets, excluded } = await this.resolveBulkTargets(query, actorUserId);
+  async bulkPreview(query: UserListQuery, actorUserId: string, actorRole: Role) {
+    const { targets, excluded } = await this.resolveBulkTargets(query, actorUserId, actorRole);
     return { matched: targets.length, excluded };
   },
 
@@ -196,8 +202,8 @@ export const userService = {
    *   - Deactivating: write Person (gate) first, then User (login).
    *   - Reactivating: write User (login) first, then Person (gate).
    */
-  async bulkSetStatus(active: boolean, query: UserListQuery, actorUserId: string) {
-    const { targets, excluded } = await this.resolveBulkTargets(query, actorUserId);
+  async bulkSetStatus(active: boolean, query: UserListQuery, actorUserId: string, actorRole: Role) {
+    const { targets, excluded } = await this.resolveBulkTargets(query, actorUserId, actorRole);
     if (targets.length === 0) return { matched: 0, modified: 0, excluded };
 
     const now = new Date();

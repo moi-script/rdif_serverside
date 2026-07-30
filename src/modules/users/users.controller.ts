@@ -32,14 +32,20 @@ export const userController = {
       res,
       await userService.bulkPreview(
         { type: q.type, department_section: q.department_section, search: q.search },
-        req.user!.userId
+        req.user!.userId,
+        req.user!.role
       )
     );
   }),
   bulkSetStatus: asyncHandler(async (req: Request, res: Response) => {
     sendSuccess(
       res,
-      await userService.bulkSetStatus(req.body.active, req.body.filter ?? {}, req.user!.userId)
+      await userService.bulkSetStatus(
+        req.body.active,
+        req.body.filter ?? {},
+        req.user!.userId,
+        req.user!.role
+      )
     );
   }),
 };

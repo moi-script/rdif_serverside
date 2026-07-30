@@ -6,6 +6,17 @@
  * Run with: npm run verify:roles
  */
 
+import {
+  ROLES,
+  ALL_ROLES,
+  STAFF_SIDE,
+  WRITE_DOMAINS,
+  rankOf,
+  rolesBelow,
+  personDomain,
+  type Role,
+} from '../constants/roles';
+
 const BASE = process.env.VERIFY_BASE_URL ?? 'http://localhost:3000/api';
 
 const failures: string[] = [];
@@ -102,6 +113,46 @@ const OK = 200;
 const FORBIDDEN = 403;
 
 async function main(): Promise<void> {
+  console.log('\n== rank and domain tables ==');
+
+  expectEqual('six roles exist', ALL_ROLES.length, 6);
+  expectEqual('superadmin outranks admins', rankOf(ROLES.SUPERADMIN) > rankOf(ROLES.HR), true);
+  expectEqual('hr and oss are peers', rankOf(ROLES.HR) === rankOf(ROLES.OSS), true);
+  expectEqual('registrar and hr are peers', rankOf(ROLES.REGISTRAR) === rankOf(ROLES.HR), true);
+  expectEqual('admins outrank students', rankOf(ROLES.OSS) > rankOf(ROLES.STUDENT), true);
+  expectEqual('staff and student are peers', rankOf(ROLES.STAFF) === rankOf(ROLES.STUDENT), true);
+
+  // rolesBelow is what replaces BULK_PROTECTED, so its exact contents matter.
+  const belowSuper = rolesBelow(ROLES.SUPERADMIN);
+  expectEqual('superadmin outranks five roles', belowSuper.length, 5);
+  expectEqual('superadmin does not outrank itself', belowSuper.includes(ROLES.SUPERADMIN), false);
+  expectEqual('superadmin outranks hr', belowSuper.includes(ROLES.HR), true);
+
+  const belowHr = rolesBelow(ROLES.HR);
+  expectEqual('hr outranks exactly two roles', belowHr.length, 2);
+  expectEqual('hr does not outrank registrar', belowHr.includes(ROLES.REGISTRAR), false);
+  expectEqual('hr does not outrank oss', belowHr.includes(ROLES.OSS), false);
+  expectEqual('hr outranks student', belowHr.includes(ROLES.STUDENT), true);
+  expectEqual('student outranks nobody', rolesBelow(ROLES.STUDENT).length, 0);
+
+  // Exhaustiveness: a role missing from either table is a runtime hole, not a
+  // type error, because Record<Role, T> is satisfied by a cast anywhere upstream.
+  for (const r of ALL_ROLES) {
+    expectEqual(`${r} has a rank`, typeof rankOf(r), 'number');
+    expectEqual(`${r} has a write-domain entry`, Array.isArray(WRITE_DOMAINS[r]), true);
+  }
+
+  expectEqual('registrar writes only students', WRITE_DOMAINS[ROLES.REGISTRAR].join(','), 'person:student');
+  expectEqual('hr writes staff and employee', WRITE_DOMAINS[ROLES.HR].join(','), 'person:staff,person:employee');
+  expectEqual('oss writes vehicles and gadgets', WRITE_DOMAINS[ROLES.OSS].join(','), 'vehicle,gadget');
+  expectEqual('oss writes no person type', WRITE_DOMAINS[ROLES.OSS].some((d) => d.startsWith('person:')), false);
+  expectEqual('staff writes nothing', WRITE_DOMAINS[ROLES.STAFF].length, 0);
+  expectEqual('student writes nothing', WRITE_DOMAINS[ROLES.STUDENT].length, 0);
+  expectEqual('personDomain maps staff', personDomain('staff'), 'person:staff');
+  expectEqual('staff-side has four roles', STAFF_SIDE.length, 4);
+  expectEqual('oss is staff-side', STAFF_SIDE.includes(ROLES.OSS as Role), true);
+  expectEqual('student is not staff-side', STAFF_SIDE.includes(ROLES.STUDENT as Role), false);
+
   const superadminLogin = await login('testadmin', 'Admin@123');
   const registrarLogin = await login('testregistrar', 'Registrar@123');
   const studentLogin = await login('2025-0001', 'Student@123');
@@ -494,7 +545,15 @@ async function main(): Promise<void> {
     true
   );
 
-  // Privileged accounts survive an unfiltered bulk deactivate.
+  // Only accounts at or above the actor's own rank survive an unfiltered bulk
+  // deactivate. Under the old flat BULK_PROTECTED list, registrar was named
+  // explicitly and always survived a superadmin's bulk deactivate. Task 1
+  // replaces that list with rolesBelow(actor): registrar (rank 2) is
+  // strictly below superadmin (rank 3), so it is now IN scope for a
+  // superadmin's bulk action — only other rank-3 accounts (and the acting
+  // user) are excluded. This is a deliberate reversal, documented in
+  // docs/superpowers/specs/2026-07-30-rbac-v2-design.md ("Deliberate
+  // reversals"), not a regression.
   const bulkAll = await request(superadmin, 'POST', '/users/bulk-status', {
     active: false,
     filter: {},
@@ -512,9 +571,9 @@ async function main(): Promise<void> {
     true
   );
   expectEqual(
-    'registrar still active after deactivate-all',
+    'registrar deactivated by superadmin bulk deactivate-all (rank, not name, decides)',
     allRows.find((u) => u.username === 'testregistrar')?.is_active,
-    true
+    false
   );
   expectEqual('exclusions were counted', bulkAllData.excluded >= 2, true);
 
