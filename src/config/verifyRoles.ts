@@ -22,6 +22,7 @@ import { assertCanActOn, assertCanCreateRole, assertCanWrite, type Actor } from 
 import { connectDB, disconnectDB } from './db';
 import { PersonModel } from '../modules/persons/persons.model';
 import { UserModel } from '../modules/users/users.model';
+import { VehicleModel } from '../modules/vehicles/vehicles.model';
 
 const BASE = process.env.VERIFY_BASE_URL ?? 'http://localhost:3000/api';
 
@@ -393,14 +394,16 @@ async function runChecks(): Promise<void> {
   const CREATED = 201;
   const stamp = Date.now();
 
-  // Registrar may create a student login.
+  // Registrar may create a student login. This account is never touched
+  // again, so cleanupProbes() removes it by prefix at the end of the run —
+  // if you change `verify-stu-` below, update PROBE_USER_USERNAME_PREFIXES.
   await check(
     'registrar creates student login',
     registrar,
     'POST',
     '/users',
     CREATED,
-    { username: `verify-stu-${stamp}`, password: 'Verify@12345', role: 'student' }
+    { username: `verify-stu-${stamp}`, password: 'Verify@12345', role: 'student' } // prefix: PROBE_USER_USERNAME_PREFIXES
   );
 
   // Registrar may not create privileged accounts.
@@ -421,14 +424,15 @@ async function runChecks(): Promise<void> {
     { username: `verify-sa-${stamp}`, password: 'Verify@12345', role: 'superadmin' }
   );
 
-  // Superadmin may create a registrar.
+  // Superadmin may create a registrar. Also never touched again — same
+  // cleanup-by-prefix note as the student login above.
   await check(
     'superadmin creates registrar',
     superadmin,
     'POST',
     '/users',
     CREATED,
-    { username: `verify-reg2-${stamp}`, password: 'Verify@12345', role: 'registrar' }
+    { username: `verify-reg2-${stamp}`, password: 'Verify@12345', role: 'registrar' } // prefix: PROBE_USER_USERNAME_PREFIXES
   );
 
   // The stored role must be what was requested.
@@ -864,9 +868,14 @@ async function runChecks(): Promise<void> {
 
   // A throwaway person + user, never a seeded account — deletion is one-way
   // and would permanently corrupt a seeded fixture used by later runs.
+  // DELETE /users/:id below only soft-deletes the User and marks the Person
+  // 'inactive' — neither document actually goes away, so cleanupProbes()
+  // removes both by prefix at the end of the run. If you change `verify-del-`
+  // on either line below, update BOTH PROBE_PERSON_ID_PREFIXES and
+  // PROBE_USER_USERNAME_PREFIXES.
   const delStamp = Date.now();
   const throwawayRfid = 'DEAD' + (delStamp % 0xffff).toString(16).toUpperCase().padStart(4, '0');
-  const throwawayIdNumber = `verify-del-${delStamp}`;
+  const throwawayIdNumber = `verify-del-${delStamp}`; // prefix: PROBE_PERSON_ID_PREFIXES
 
   const personRes = await request(superadmin, 'POST', '/persons', {
     full_name: 'Verify Deletion Throwaway',
@@ -880,7 +889,7 @@ async function runChecks(): Promise<void> {
     ?._id ?? (personRes.json.data as { _id?: string; id?: string } | undefined)?.id;
   if (!throwawayPersonId) throw new Error('throwaway person creation did not return an id');
 
-  const delUsername = `verify-del-${delStamp}`;
+  const delUsername = `verify-del-${delStamp}`; // prefix: PROBE_USER_USERNAME_PREFIXES
   const delUserRes = await request(superadmin, 'POST', '/users', {
     username: delUsername,
     password: 'Verify@12345',
@@ -1148,14 +1157,15 @@ async function runChecks(): Promise<void> {
   await check('hr GET /persons', hr, 'GET', '/persons', OK);
   await check('oss GET /persons', oss, 'GET', '/persons', OK);
 
-  // There is NO DELETE /persons/:id route, so probe rows cannot be cleaned up.
-  // The harness's existing convention (see the throwaway block near line 625)
-  // is a timestamp-suffixed id_number and RFID, never a seeded fixture: rows
-  // accumulate but every run is independent, and the printed check labels stay
-  // static so output remains byte-identical.
+  // There is NO DELETE /persons/:id route, so these rows are removed by
+  // cleanupProbes() at the end of the run instead, matched by the
+  // `verify-rbac-` prefix (never used by a seeded fixture). Same
+  // timestamp-suffixed id_number/RFID convention as the throwaway block
+  // above. If you change the `verify-rbac-` prefix on either line below,
+  // update PROBE_PERSON_ID_PREFIXES too.
   const rbacStamp = Date.now();
-  const probeStudentId = `verify-rbac-s-${rbacStamp}`;
-  const probeStaffId = `verify-rbac-t-${rbacStamp}`;
+  const probeStudentId = `verify-rbac-s-${rbacStamp}`; // prefix: PROBE_PERSON_ID_PREFIXES
+  const probeStaffId = `verify-rbac-t-${rbacStamp}`; // prefix: PROBE_PERSON_ID_PREFIXES
   const probeStudentRfid = 'BEEF' + (rbacStamp % 0xffff).toString(16).toUpperCase().padStart(4, '0');
   const probeStaffRfid = 'CAFE' + (rbacStamp % 0xffff).toString(16).toUpperCase().padStart(4, '0');
 
@@ -1226,14 +1236,18 @@ async function runChecks(): Promise<void> {
   await check('student GET /vehicles denied', student, 'GET', '/vehicles', FORBIDDEN);
 
   // Vehicle.owner_person_id is UNIQUE and there is NO DELETE /vehicles/:id
-  // route, so a probe vehicle cannot be cleaned up and cannot reuse an owner
-  // that already has one. Create a fresh throwaway owner per run instead —
-  // same convention as the person probes in Task 5.
+  // route, so a probe vehicle cannot reuse an owner that already has one —
+  // create a fresh throwaway owner per run instead, same convention as the
+  // person probes above. cleanupProbes() below removes both this owner
+  // (id_number prefix already covered by PROBE_PERSON_ID_PREFIXES) and the
+  // vehicle itself (PROBE_VEHICLE_PLATE_PREFIX) at the end of the run — if
+  // you change the `verify-rbac-v-` or `RBAC-` prefix below, update the
+  // matching constant near cleanupProbes() too, or this starts leaking again.
   const vStamp = Date.now();
   const vSuffix = (vStamp % 0xffff).toString(16).toUpperCase().padStart(4, '0');
   const ownerRes = await request(superadmin, 'POST', '/persons', {
     full_name: 'RBAC Vehicle Owner', type: 'student',
-    id_number: `verify-rbac-v-${vStamp}`, department_section: 'BSIT 4-A',
+    id_number: `verify-rbac-v-${vStamp}`, department_section: 'BSIT 4-A', // prefix: PROBE_PERSON_ID_PREFIXES
     rfid_uid: 'FACE' + vSuffix,
   });
   expectEqual('throwaway vehicle owner created', ownerRes.status, 201);
@@ -1243,7 +1257,7 @@ async function runChecks(): Promise<void> {
 
   const vehicleBody = {
     owner_person_id: ownerId,
-    plate_number: `RBAC-${vSuffix}`,
+    plate_number: `RBAC-${vSuffix}`, // prefix: PROBE_VEHICLE_PLATE_PREFIX — keep these in sync
     rfid_uid: 'D0E1' + vSuffix,
     vehicle_type: 'Motorcycle',
     vehicle_model: 'Honda Adv',
@@ -1269,43 +1283,70 @@ async function runChecks(): Promise<void> {
 }
 
 /**
- * Prefixes this harness uses for the probe Person/User records it creates.
- * There is deliberately no `DELETE /persons/:id` route (see the module
- * comment above the "person write domains" section), so cleanup has to go
+ * Prefixes this harness uses for the probe Person/User/Vehicle records it
+ * creates. There is deliberately no `DELETE /persons/:id` or
+ * `DELETE /vehicles/:id` route (see the module comments above the "person
+ * write domains" and "vehicle write domain" sections), so cleanup has to go
  * straight at the database — the same pattern rebuildOccupancy.ts uses for
  * config-script DB access. Every prefix here was found by grepping this file
- * for the literal strings passed as `id_number`/`username`, not guessed:
+ * for the literal strings passed as `id_number`/`username`/`plate_number`,
+ * not guessed:
  *   - Person.id_number: 'verify-rbac-' (student/staff/vehicle-owner probes),
  *     'verify-del-' (the deletion-test throwaway, left 'inactive' rather
  *     than removed by DELETE /users/:id).
  *   - User.username: 'verify-stu-' and 'verify-reg2-' (created and never
  *     touched again), 'verify-del-' (soft-deleted by DELETE /users/:id,
  *     which sets deleted_at but does not remove the document).
+ *   - Vehicle.plate_number: 'RBAC-' (seeded plates use 'NCST-', see
+ *     testSeed.ts — 'RBAC-' never collides with a fixture). Each run's
+ *     vehicle probe's owner Person is removed by PROBE_PERSON_ID_PREFIXES
+ *     above, so leaving the vehicle behind would orphan it — a strictly
+ *     worse defect than the original leak, since GET /vehicles has the same
+ *     100-row page cap as /persons and /users.
  * Matching by prefix — not by this run's own stamp — means a run also mops
  * up any litter left by earlier, pre-fix runs, and it is structurally unable
- * to touch a seeded fixture: no seeded username or id_number starts with any
- * of these prefixes.
+ * to touch a seeded fixture: no seeded username, id_number, or plate_number
+ * starts with any of these prefixes.
+ *
+ * If a future edit adds a new probe-creating call site, grep for
+ * "prefix: PROBE_" comments at each existing creation site — every one names
+ * the constant it must be added to. There is no automated check tying a new
+ * prefix to these arrays (no test framework exists to host one); see the
+ * report for a proposal on what a cheap automated guard could look like.
  */
 const PROBE_PERSON_ID_PREFIXES = ['verify-rbac-', 'verify-del-'];
 const PROBE_USER_USERNAME_PREFIXES = ['verify-stu-', 'verify-reg2-', 'verify-del-'];
+const PROBE_VEHICLE_PLATE_PREFIXES = ['RBAC-'];
 
 /**
- * Removes every Person/User row this harness has ever created (this run's
- * and any earlier run's), so the collections stop growing. Must run even
- * when `runChecks()` throws or logs failures — see the try/finally around
- * its call in `main()` — but must never itself change the process exit code;
- * `summary()` is what decides pass/fail, and it runs after this, untouched.
+ * Removes every Person/User/Vehicle row this harness has ever created (this
+ * run's and any earlier run's), so the collections stop growing. Must run
+ * even when `runChecks()` throws or logs failures — see the try/finally
+ * around its call in `main()` — but must never itself change the process
+ * exit code; `summary()` is what decides pass/fail, and it runs after this,
+ * untouched.
+ *
+ * Vehicles are deleted before Persons: a probe Vehicle's owner_person_id
+ * points at a probe Person, and while Mongo enforces no real foreign key
+ * here, deleting the referencing row first keeps the intermediate DB state
+ * consistent (never a Vehicle pointing at an already-deleted Person) in case
+ * this function is ever interrupted between the two deletes.
  */
 async function cleanupProbes(): Promise<void> {
   console.log('\n== cleanup: removing probe records this harness created ==');
   await connectDB();
   try {
+    const vehicleRegex = new RegExp(`^(${PROBE_VEHICLE_PLATE_PREFIXES.join('|')})`);
     const personRegex = new RegExp(`^(${PROBE_PERSON_ID_PREFIXES.join('|')})`);
     const userRegex = new RegExp(`^(${PROBE_USER_USERNAME_PREFIXES.join('|')})`);
 
+    const vehicleResult = await VehicleModel.deleteMany({ plate_number: { $regex: vehicleRegex } });
     const personResult = await PersonModel.deleteMany({ id_number: { $regex: personRegex } });
     const userResult = await UserModel.deleteMany({ username: { $regex: userRegex } });
 
+    console.log(
+      `  removed ${vehicleResult.deletedCount} probe vehicle(s) (plate_number matching ${PROBE_VEHICLE_PLATE_PREFIXES.join(', ')})`
+    );
     console.log(
       `  removed ${personResult.deletedCount} probe person(s) (id_number matching ${PROBE_PERSON_ID_PREFIXES.join(', ')})`
     );
