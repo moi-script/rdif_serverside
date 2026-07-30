@@ -44,6 +44,7 @@ node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | Seed admin credentials |
 | `LOGIN_RATE_LIMIT_MAX` | Max `/auth/login` requests per 15 min (default `10`). `npm run verify:roles` makes 8 login calls per run, so running it twice in a row needs at least `20`. |
 | `OCCUPANCY_RESET_TIME` | Nightly cutoff (`HH:MM`, default `23:00`) after which a card still marked inside is treated as outside. Prevents a missed exit tap from locking someone out the next morning. |
+| `VERIFY_BYPASS_TOKEN` | Optional, unset by default. Lets the `verify:*` harnesses run back to back at production rate limits instead of tripping them (see the "429s during a verify run" entry below). `shouldBypassRateLimit()` in `src/middlewares/rateLimiter.ts` only honours it when `NODE_ENV` is not `production`, so it is inert in a production configuration regardless of whether it happens to be set — but it must never be set on a production host anyway. **Never set it in production.** |
 
 ## Scripts
 
@@ -95,13 +96,25 @@ node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
   like a first entry. Take the gate offline for the rebuild window, or accept
   that every tap during it is treated as a fresh entry.
 - **A `verify:*` run reports 429s, or `verify:passback` dies with
-  `TypeError: Cannot read properties of undefined (reading 'find')`.** The run
-  hit `globalLimiter` (`RATE_LIMIT_MAX`, default 200, per
-  `RATE_LIMIT_WINDOW_MS`, default 60s), which applies to every API route.
-  Running all four harnesses back to back exceeds it. This is **not** the login
-  limiter — raising `LOGIN_RATE_LIMIT_MAX` does not help. Run the harnesses one
-  at a time, leaving a window between them, or raise `RATE_LIMIT_MAX` for a
-  verification run and restore it afterwards.
+  `TypeError: Cannot read properties of undefined (reading 'find')`.** All
+  four `verify:*` harnesses send `X-Verify-Bypass: $VERIFY_BYPASS_TOKEN` on
+  every request (login calls included), which lets `globalLimiter`,
+  `loginLimiter`, and `scanLimiter` all skip counting the run, provided the
+  server has the same `VERIFY_BYPASS_TOKEN` set and `NODE_ENV` is not
+  `production` (`shouldBypassRateLimit()` in
+  `src/middlewares/rateLimiter.ts`). If you're seeing 429s despite that:
+  - **`VERIFY_BYPASS_TOKEN` is unset or mismatched** between the harness's
+    environment and the running server's `.env` — set the same value in both
+    and restart the dev server so it picks up the change (`ts-node-dev`
+    re-reads `.env` on respawn, but not while already running).
+  - **You're intentionally running without it** (e.g. to check the harnesses
+    still behave correctly under the real limits) — that's expected; the
+    harnesses report the 429 clearly rather than mistaking it for an
+    authorization failure. Run the harnesses one at a time, leaving a window
+    between them, or set `VERIFY_BYPASS_TOKEN` for the run.
+  - **You're running against a production server** — the bypass is
+    deliberately inert there, by design; don't raise the production limits to
+    work around it.
 
 ## Test accounts (`npm run seed:test`)
 

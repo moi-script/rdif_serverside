@@ -48,10 +48,17 @@ function at(day: number, hh: number, mm: number): Date {
 
 const BASE = process.env.VERIFY_BASE_URL ?? 'http://localhost:3000/api';
 
+// Every harness request carries this header; see the matching comment in
+// verifyRoles.ts. Unset means this run is subject to the real rate limits.
+const VERIFY_BYPASS_TOKEN = process.env.VERIFY_BYPASS_TOKEN;
+const BYPASS_HEADERS: Record<string, string> = VERIFY_BYPASS_TOKEN
+  ? { 'X-Verify-Bypass': VERIFY_BYPASS_TOKEN }
+  : {};
+
 async function login(username: string, password: string): Promise<string> {
   const res = await fetch(`${BASE}/auth/login`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...BYPASS_HEADERS },
     body: JSON.stringify({ username, password }),
   });
   const body = (await res.json()) as { data?: { accessToken?: string } };
@@ -71,6 +78,7 @@ async function request(
     headers: {
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+      ...BYPASS_HEADERS,
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });

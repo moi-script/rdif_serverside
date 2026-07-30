@@ -19,6 +19,7 @@ import {
   type Role,
 } from '../constants/roles';
 import { assertCanActOn, assertCanCreateRole, assertCanWrite, type Actor } from '../utils/authority';
+import { shouldBypassRateLimit } from '../middlewares/rateLimiter';
 import { connectDB, disconnectDB } from './db';
 import { PersonModel } from '../modules/persons/persons.model';
 import { UserModel } from '../modules/users/users.model';
@@ -26,6 +27,17 @@ import { VehicleModel } from '../modules/vehicles/vehicles.model';
 import { grantSuperadmin } from './grantSuperadmin';
 
 const BASE = process.env.VERIFY_BASE_URL ?? 'http://localhost:3000/api';
+
+// Every harness request carries this header. The server's rate limiters only
+// honour it when NODE_ENV isn't production AND VERIFY_BYPASS_TOKEN is set to
+// the same value server-side (see shouldBypassRateLimit() in
+// middlewares/rateLimiter.ts) — so leaving VERIFY_BYPASS_TOKEN unset here
+// just means this run is subject to the real limits, exactly like before this
+// opt-out existed.
+const VERIFY_BYPASS_TOKEN = process.env.VERIFY_BYPASS_TOKEN;
+const BYPASS_HEADERS: Record<string, string> = VERIFY_BYPASS_TOKEN
+  ? { 'X-Verify-Bypass': VERIFY_BYPASS_TOKEN }
+  : {};
 
 const failures: string[] = [];
 let checks = 0;
@@ -36,7 +48,7 @@ async function login(
 ): Promise<{ token: string; role: string | undefined }> {
   const res = await fetch(`${BASE}/auth/login`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...BYPASS_HEADERS },
     body: JSON.stringify({ username, password }),
   });
   const body = (await res.json()) as { data?: { accessToken?: string; user?: { role?: string } } };
@@ -58,6 +70,7 @@ async function request(
     headers: {
       Authorization: `Bearer ${token}`,
       ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+      ...BYPASS_HEADERS,
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
@@ -174,6 +187,44 @@ const OK = 200;
 const FORBIDDEN = 403;
 
 async function runChecks(): Promise<void> {
+  console.log('\n== rate-limit bypass guard fails closed ==');
+
+  // shouldBypassRateLimit() is exported as a pure function specifically so
+  // the production case can be proven here, without a test framework and
+  // without ever standing up a production server. The first assertion is
+  // the one that matters most: production must never bypass, even with the
+  // exact right token.
+  expectEqual(
+    'production never bypasses, even with a correct token',
+    shouldBypassRateLimit(true, 'tok', 'tok'),
+    false
+  );
+  expectEqual(
+    'no configured token means no bypass',
+    shouldBypassRateLimit(false, undefined, 'tok'),
+    false
+  );
+  expectEqual(
+    'an empty configured token must not match an empty header',
+    shouldBypassRateLimit(false, '', ''),
+    false
+  );
+  expectEqual(
+    'no header presented means no bypass',
+    shouldBypassRateLimit(false, 'tok', undefined),
+    false
+  );
+  expectEqual(
+    'a mismatched header means no bypass',
+    shouldBypassRateLimit(false, 'tok', 'wrong'),
+    false
+  );
+  expectEqual(
+    'non-prod, configured, and matching header bypasses',
+    shouldBypassRateLimit(false, 'tok', 'tok'),
+    true
+  );
+
   console.log('\n== rank and domain tables ==');
 
   expectEqual('six roles exist', ALL_ROLES.length, 6);
@@ -589,7 +640,7 @@ async function runChecks(): Promise<void> {
   // A deactivated account cannot log in.
   const deniedLogin = await fetch(`${BASE}/auth/login`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...BYPASS_HEADERS },
     body: JSON.stringify({ username: '2025-0001', password: 'Student@123' }),
   });
   expectEqual('deactivated user cannot log in', deniedLogin.status, 401);
@@ -1018,7 +1069,7 @@ async function runChecks(): Promise<void> {
 
   const deletedLogin = await fetch(`${BASE}/auth/login`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...BYPASS_HEADERS },
     body: JSON.stringify({ username: delUsername, password: 'Verify@12345' }),
   });
   expectEqual('deleted user cannot log in', deletedLogin.status, 401);

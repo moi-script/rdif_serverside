@@ -35,6 +35,13 @@ function summary(): void {
 
 const BASE = process.env.VERIFY_BASE_URL ?? 'http://localhost:3000/api';
 
+// Every harness request carries this header; see the matching comment in
+// verifyRoles.ts. Unset means this run is subject to the real rate limits.
+const VERIFY_BYPASS_TOKEN = process.env.VERIFY_BYPASS_TOKEN;
+const BYPASS_HEADERS: Record<string, string> = VERIFY_BYPASS_TOKEN
+  ? { 'X-Verify-Bypass': VERIFY_BYPASS_TOKEN }
+  : {};
+
 /** A real 1x1 transparent PNG, so uploads exercise the same path a browser would. */
 const TINY_PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
@@ -55,7 +62,7 @@ async function login(
 ): Promise<{ token: string; personId: string | null }> {
   const res = await fetch(`${BASE}/auth/login`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...BYPASS_HEADERS },
     body: JSON.stringify({ username, password }),
   });
   const body = (await res.json()) as {
@@ -73,7 +80,7 @@ async function request(
 ): Promise<{ status: number; json: Record<string, unknown> }> {
   const res = await fetch(`${BASE}${path}`, {
     method,
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...BYPASS_HEADERS },
   });
   let json: Record<string, unknown> = {};
   try {
@@ -99,7 +106,7 @@ async function uploadSignature(
   );
   const res = await fetch(`${BASE}/persons/${personId}/signature`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${token}` },
+    headers: { Authorization: `Bearer ${token}`, ...BYPASS_HEADERS },
     body: form,
   });
   let json: Record<string, unknown> = {};
@@ -117,7 +124,7 @@ async function fetchSignature(
   personId: string
 ): Promise<{ status: number; contentType: string | null; bytes: number }> {
   const res = await fetch(`${BASE}/persons/${personId}/signature`, {
-    headers: { Authorization: `Bearer ${token}` },
+    headers: { Authorization: `Bearer ${token}`, ...BYPASS_HEADERS },
   });
   const buf = res.ok ? Buffer.from(await res.arrayBuffer()) : Buffer.alloc(0);
   return { status: res.status, contentType: res.headers.get('content-type'), bytes: buf.length };

@@ -25,6 +25,10 @@ const envSchema = z.object({
     .string()
     .regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'OCCUPANCY_RESET_TIME must be HH:MM (24-hour)')
     .default('23:00'),
+  // Opt-out for the verification harnesses only — see
+  // shouldBypassRateLimit() in middlewares/rateLimiter.ts for the fail-closed
+  // guard. Optional and undefined by default; must never be set in production.
+  VERIFY_BYPASS_TOKEN: z.string().optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);
