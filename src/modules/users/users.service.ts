@@ -4,7 +4,8 @@ import { userRepo, UserListQuery } from './users.repository';
 import { IUser, UserModel } from './users.model';
 import { ApiError } from '../../utils/ApiError';
 import { getPagination, buildMeta } from '../../utils/pagination';
-import { Role, rolesBelow, bulkEligibleRoles } from '../../constants/roles';
+import { Role, bulkEligibleRoles, personDomain, WRITE_DOMAINS } from '../../constants/roles';
+import { Actor, assertCanActOn, assertCanCreateRole, assertCanWrite } from '../../utils/authority';
 import { personRepo } from '../persons/persons.repository';
 import { PersonModel } from '../persons/persons.model';
 
@@ -29,14 +30,17 @@ export const userService = {
     return { items, meta: buildMeta(total, p.page, p.limit) };
   },
 
-  async create(input: CreateUserInput, actorRole: Role) {
-    // Never create an account at or above your own authority level. On create
-    // there is no target row, so the rule applies to the REQUESTED role.
-    if (!rolesBelow(actorRole).includes(input.role)) {
-      throw new ApiError(
-        'FORBIDDEN',
-        'You cannot create an account at or above your own authority level'
-      );
+  async create(input: CreateUserInput, actor: Actor) {
+    // Rank: never at or above your own level. On create there is no target
+    // row, so the rule applies to the requested role.
+    assertCanCreateRole(actor, input.role);
+
+    // Domain: a login is created FOR a person. Rank alone would let OSS
+    // create student logins — rank-legal, domain-illegal.
+    if (input.person_id) {
+      const person = await personRepo.findById(String(input.person_id));
+      if (!person) throw new ApiError('NOT_FOUND', 'Person not found');
+      assertCanWrite(actor, personDomain(person.type));
     }
 
     const existing = await userRepo.findByUsername(input.username);
@@ -60,9 +64,12 @@ export const userService = {
     };
   },
 
-  async resetPassword(id: string, password: string) {
+  async resetPassword(id: string, password: string, actor: Actor) {
     const target = await userRepo.findById(id);
     if (!target || target.deleted_at) throw new ApiError('NOT_FOUND', 'User not found');
+    // Rank only: no Person is written, so no domain check applies. This
+    // asymmetry vs. setStatus/softDelete is deliberate, per the spec.
+    assertCanActOn(actor, target);
 
     const password_hash = await bcrypt.hash(password, BCRYPT_ROUNDS);
     const updated = await userRepo.updateById(id, {
@@ -80,13 +87,10 @@ export const userService = {
    * Person first, then user — same fail-safe rule as setStatus. If the second write is
    * lost, the card is already refused at the gate and only the login survives.
    */
-  async softDelete(id: string, actorUserId: string) {
-    if (id === actorUserId) {
-      throw new ApiError('FORBIDDEN', 'You cannot delete your own account');
-    }
-
+  async softDelete(id: string, actor: Actor) {
     const target = await userRepo.findById(id);
     if (!target || target.deleted_at) throw new ApiError('NOT_FOUND', 'User not found');
+    await this.assertCanActOnPersonBackedAccount(actor, target);
 
     if (target.person_id) {
       await personRepo.updateById(String(target.person_id), { status: 'inactive' });
@@ -97,11 +101,29 @@ export const userService = {
       is_active: false,
       deleted_at: now,
       deactivated_at: now,
-      deactivated_by: new Types.ObjectId(actorUserId),
+      deactivated_by: new Types.ObjectId(actor.id),
       refreshTokenHash: null,
     });
 
     return { id, deleted: true };
+  },
+
+  /**
+   * The status toggle and soft-delete write BOTH the User and its Person, so
+   * both rules apply and DOMAIN WINS over rank: HR outranks a student account
+   * but may not write a person:student record, so HR cannot deactivate a
+   * student. See the ruling in the spec's cross-rule interaction 1.
+   *
+   * A dangling person_id (User pointing at a deleted Person) has no gate side
+   * to write, so rank alone governs. Do NOT fail closed on it — that turns a
+   * data-integrity problem into what looks like a permissions bug.
+   */
+  async assertCanActOnPersonBackedAccount(actor: Actor, target: IUser): Promise<void> {
+    assertCanActOn(actor, target);
+    if (!target.person_id) return;
+    const person = await personRepo.findById(String(target.person_id));
+    if (!person) return;
+    assertCanWrite(actor, personDomain(person.type));
   },
 
   /**
@@ -123,19 +145,16 @@ export const userService = {
    *     never happens, the login works but the gate stays shut — safe in the
    *     same direction.
    */
-  async setStatus(id: string, active: boolean, actorUserId: string) {
-    if (id === actorUserId) {
-      throw new ApiError('FORBIDDEN', 'You cannot change your own account status');
-    }
-
+  async setStatus(id: string, active: boolean, actor: Actor) {
     const target = await userRepo.findById(id);
     if (!target || target.deleted_at) throw new ApiError('NOT_FOUND', 'User not found');
+    await this.assertCanActOnPersonBackedAccount(actor, target);
 
     const userUpdate = {
       is_active: active,
       refreshTokenHash: active ? undefined : null,
       deactivated_at: active ? null : new Date(),
-      deactivated_by: active ? null : new Types.ObjectId(actorUserId),
+      deactivated_by: active ? null : new Types.ObjectId(actor.id),
     };
 
     let person_status: 'active' | 'inactive' | null = null;
@@ -165,32 +184,58 @@ export const userService = {
   },
 
   /**
-   * The set a bulk action would touch: the filter, minus privileged accounts,
-   * minus the actor. Exclusions are applied here — server-side — so a crafted
-   * request cannot reach a superadmin or registrar account.
+   * The set a bulk action would touch: the filter, minus accounts at or above
+   * the actor's authority level, minus the actor.
+   *
+   * Exclusions are applied here — server-side — and bulkSetStatus writes
+   * against the resulting explicit _id list, never the client's filter, so a
+   * crafted request cannot reach a peer. `excluded` is what the UI shows,
+   * which is why the rule is applied here rather than pushed into the Mongo
+   * query: rows removed by a query predicate never come back and cannot be
+   * counted.
    */
-  async resolveBulkTargets(query: UserListQuery, actorUserId: string, actorRole: Role) {
+  async resolveBulkTargets(query: UserListQuery, actor: Actor) {
     const base = await userRepo.buildFilter(query);
-    const candidates = await UserModel.find(base).select('_id role').lean();
+    const candidates = await UserModel.find(base).select('_id role person_id').lean();
 
-    const below = bulkEligibleRoles(actorRole);
+    const below = bulkEligibleRoles(actor.role);
+    const writable = WRITE_DOMAINS[actor.role];
+
+    // Domain wins here too, and this is the single most damaging hole in the
+    // subsystem if it is missed: a role-only predicate would let HR's
+    // "Deactivate All" sweep every student on campus, because HR outranks all
+    // of them. One query for the candidates' person types, not one per row.
+    const personIds = candidates
+      .map((c) => c.person_id)
+      .filter((p): p is NonNullable<typeof p> => Boolean(p));
+    const persons = personIds.length
+      ? await PersonModel.find({ _id: { $in: personIds } }).select('_id type').lean()
+      : [];
+    const typeById = new Map(persons.map((p) => [String(p._id), p.type]));
 
     const targets: string[] = [];
     let excluded = 0;
     for (const c of candidates) {
-      const isProtected = !below.includes(c.role as Role);
-      const isSelf = String(c._id) === actorUserId;
-      if (isProtected || isSelf) {
+      if (!below.includes(c.role as Role) || String(c._id) === actor.id) {
         excluded++;
         continue;
+      }
+      if (c.person_id) {
+        const type = typeById.get(String(c.person_id));
+        // A dangling person_id has no gate side, so rank alone governs it —
+        // matching assertCanActOnPersonBackedAccount above.
+        if (type && !writable.includes(personDomain(type as 'student' | 'staff' | 'employee'))) {
+          excluded++;
+          continue;
+        }
       }
       targets.push(String(c._id));
     }
     return { targets, excluded };
   },
 
-  async bulkPreview(query: UserListQuery, actorUserId: string, actorRole: Role) {
-    const { targets, excluded } = await this.resolveBulkTargets(query, actorUserId, actorRole);
+  async bulkPreview(query: UserListQuery, actor: Actor) {
+    const { targets, excluded } = await this.resolveBulkTargets(query, actor);
     return { matched: targets.length, excluded };
   },
 
@@ -202,8 +247,8 @@ export const userService = {
    *   - Deactivating: write Person (gate) first, then User (login).
    *   - Reactivating: write User (login) first, then Person (gate).
    */
-  async bulkSetStatus(active: boolean, query: UserListQuery, actorUserId: string, actorRole: Role) {
-    const { targets, excluded } = await this.resolveBulkTargets(query, actorUserId, actorRole);
+  async bulkSetStatus(active: boolean, query: UserListQuery, actor: Actor) {
+    const { targets, excluded } = await this.resolveBulkTargets(query, actor);
     if (targets.length === 0) return { matched: 0, modified: 0, excluded };
 
     const now = new Date();
@@ -213,7 +258,7 @@ export const userService = {
         is_active: active,
         refreshTokenHash: null,
         deactivated_at: active ? null : now,
-        deactivated_by: active ? null : new Types.ObjectId(actorUserId),
+        deactivated_by: active ? null : new Types.ObjectId(actor.id),
       },
     };
 

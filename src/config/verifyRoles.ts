@@ -259,11 +259,6 @@ async function main(): Promise<void> {
   const ossLogin = await login('testoss', 'Oss@12345');
   const hr = hrLogin.token;
   const oss = ossLogin.token;
-  // hr/oss are not yet exercised by any check() call in this task — they are
-  // wired up here so Tasks 4-8's HTTP checks can consume them without
-  // touching the login block again.
-  void hr;
-  void oss;
 
   console.log('\n== seeded accounts carry the expected roles ==');
   expectEqual('testadmin is superadmin', superadminLogin.role, 'superadmin');
@@ -440,6 +435,7 @@ async function main(): Promise<void> {
   const statusRows = (forStatus.json.data ?? []) as {
     id: string;
     username: string;
+    role: string;
     person: { id: string; status: string } | null;
   }[];
   const juanRow = statusRows.find((u) => u.username === '2025-0001');
@@ -447,13 +443,19 @@ async function main(): Promise<void> {
   const juanUserId = juanRow.id;
   const selfRow = statusRows.find((u) => u.username === 'testadmin');
   if (!selfRow) throw new Error('seed missing: testadmin');
+  const empStaffRow = statusRows.find((u) => u.username === 'EMP-1001');
+  if (!empStaffRow) throw new Error('seed missing: staff EMP-1001');
 
-  // Only superadmin may flip status.
+  // The route now admits every staff-side role (STAFF_SIDE_GUARD), so a bare
+  // "only superadmin" denial no longer holds. Registrar outranks staff
+  // (rank 2 > 1) but does not write person:staff, so domain still denies it —
+  // exercised here on a single-target PATCH; the peer/domain matrix on
+  // students is covered in the "rank enforcement on accounts" section below.
   await check(
-    'registrar cannot deactivate',
+    'registrar cannot deactivate a staff account (domain)',
     registrar,
     'PATCH',
-    `/users/${juanUserId}/status`,
+    `/users/${empStaffRow.id}/status`,
     FORBIDDEN,
     { active: false }
   );
@@ -536,10 +538,15 @@ async function main(): Promise<void> {
     null
   );
 
-  // A superadmin may deactivate ANOTHER superadmin individually — only the
-  // bulk path (Task 8) protects privileged roles. Use the prod-seeded
-  // 'admin' account as the target (not 'testadmin', which is the account we
-  // are authenticated as, and self-action is FORBIDDEN).
+  // assertCanActOn (Task 2) denies peers and superiors on EVERY path,
+  // superadmin-on-superadmin included — a deliberate reversal of the old
+  // role-system spec's ruling that a superadmin may individually deactivate
+  // another superadmin. Now that setStatus routes through
+  // assertCanActOnPersonBackedAccount (which calls assertCanActOn first),
+  // this must be a 403, not the 200 an earlier draft of this harness
+  // expected. Use the prod-seeded 'admin' account as the target (not
+  // 'testadmin', which is the account we are authenticated as — that would
+  // conflate this with the self-action check above).
   const forAdminTarget = await request(superadmin, 'GET', '/users?limit=100');
   const adminRows = (forAdminTarget.json.data ?? []) as { id: string; username: string }[];
   const otherSuperadminRow = adminRows.find((u) => u.username === 'admin');
@@ -547,59 +554,71 @@ async function main(): Promise<void> {
   const otherSuperadminId = otherSuperadminRow.id;
 
   await check(
-    'superadmin deactivates another superadmin',
+    'superadmin cannot deactivate a peer superadmin individually (peer protection extends to superadmins)',
     superadmin,
     'PATCH',
     `/users/${otherSuperadminId}/status`,
-    OK,
+    FORBIDDEN,
     { active: false }
   );
-  const afterOtherOff = await request(superadmin, 'GET', '/users?limit=100');
-  const otherOffRow = ((afterOtherOff.json.data ?? []) as typeof statusRows).find(
+  const afterOtherAttempt = await request(superadmin, 'GET', '/users?limit=100');
+  const otherAttemptRow = ((afterOtherAttempt.json.data ?? []) as typeof statusRows).find(
     (u) => u.username === 'admin'
   );
   expectEqual(
-    'other superadmin login disabled',
-    (otherOffRow as unknown as { is_active: boolean })?.is_active,
-    false
-  );
-
-  // Restore state so the harness stays re-runnable.
-  await check(
-    'superadmin reactivates the other superadmin',
-    superadmin,
-    'PATCH',
-    `/users/${otherSuperadminId}/status`,
-    OK,
-    { active: true }
-  );
-  const afterOtherOn = await request(superadmin, 'GET', '/users?limit=100');
-  const otherOnRow = ((afterOtherOn.json.data ?? []) as typeof statusRows).find(
-    (u) => u.username === 'admin'
-  );
-  expectEqual(
-    'other superadmin login re-enabled',
-    (otherOnRow as unknown as { is_active: boolean })?.is_active,
+    'other superadmin login unaffected by the denied attempt',
+    (otherAttemptRow as unknown as { is_active: boolean })?.is_active,
     true
   );
 
   console.log('\n== bulk activate / deactivate ==');
 
-  // Only superadmin.
-  await check(
-    'registrar cannot bulk deactivate',
-    registrar,
-    'POST',
-    '/users/bulk-status',
-    FORBIDDEN,
-    { active: false, filter: { type: 'student' } }
-  );
-  await check(
-    'registrar cannot preview bulk',
+  // STAFF_SIDE_GUARD now admits registrar to the bulk routes at all — the
+  // former "only superadmin" denial no longer holds at the route level.
+  // The domain rule still governs what a bulk action actually touches:
+  // registrar's write domain is person:student only, so a staff-type filter
+  // resolves to zero targets (all excluded), not a 403. This exercises the
+  // domain half of resolveBulkTargets without mutating any seeded account —
+  // matched: 0 means nothing was written, so there is nothing to restore.
+  const registrarStaffPreview = await request(
     registrar,
     'GET',
-    '/users/bulk-status/preview?type=student',
-    FORBIDDEN
+    '/users/bulk-status/preview?type=staff'
+  );
+  const registrarStaffPreviewData = (registrarStaffPreview.json.data ?? {}) as {
+    matched?: number;
+    excluded?: number;
+  };
+  expectEqual(
+    'registrar bulk preview on staff filter responds 200 (route allows staff-side roles)',
+    registrarStaffPreview.status,
+    OK
+  );
+  expectEqual(
+    'registrar bulk preview on staff filter matches nothing (domain excludes it)',
+    registrarStaffPreviewData.matched,
+    0
+  );
+  expectEqual(
+    'registrar bulk preview on staff filter excludes at least one (domain)',
+    (registrarStaffPreviewData.excluded ?? 0) > 0,
+    true
+  );
+
+  const registrarStaffApply = await request(registrar, 'POST', '/users/bulk-status', {
+    active: false,
+    filter: { type: 'staff' },
+  });
+  const registrarStaffApplyData = (registrarStaffApply.json.data ?? {}) as {
+    matched?: number;
+    modified?: number;
+  };
+  expectEqual('registrar bulk apply on staff filter responds 200', registrarStaffApply.status, OK);
+  expectEqual('registrar bulk apply on staff filter matches nothing', registrarStaffApplyData.matched, 0);
+  expectEqual(
+    'registrar bulk apply on staff filter modifies nothing',
+    registrarStaffApplyData.modified,
+    0
   );
 
   // Preview count must match what the mutation reports.
@@ -908,6 +927,163 @@ async function main(): Promise<void> {
     `/users/${throwawayUserId}`,
     FORBIDDEN
   );
+
+  console.log('\n== rank enforcement on accounts ==');
+
+  // Peer creation — the hole assertCanCreateRole closes.
+  await check('hr cannot create a peer hr', hr, 'POST', '/users', FORBIDDEN, {
+    username: 'rbac-peer-hr', password: 'Verify@12345', role: 'hr',
+  });
+  await check('hr cannot create a registrar', hr, 'POST', '/users', FORBIDDEN, {
+    username: 'rbac-peer-reg', password: 'Verify@12345', role: 'registrar',
+  });
+  await check('superadmin cannot create a superadmin', superadmin, 'POST', '/users', FORBIDDEN, {
+    username: 'rbac-peer-super', password: 'Verify@12345', role: 'superadmin',
+  });
+
+  // Widened reads.
+  await check('hr GET /users', hr, 'GET', '/users', OK);
+  await check('oss GET /users', oss, 'GET', '/users', OK);
+
+  // Rank on status changes. Resolve the registrar's own user id first.
+  const rankUserList = await request(superadmin, 'GET', '/users?limit=100');
+  const rankUserRows =
+    (rankUserList.json.data as { id: string; role: string; username: string; person: unknown }[]) ?? [];
+  expectEqual('user list is non-empty', rankUserRows.length > 0, true);
+  const registrarRow = rankUserRows.find((u) => u.role === 'registrar');
+  // Must be a PERSON-BACKED student, not one of the person-less accounts this
+  // very script creates earlier (e.g. `verify-stu-<stamp>`, created without a
+  // person_id) — those sort first (newest first) and would let the domain
+  // check pass trivially (no Person to write, so rank alone governs, per the
+  // dangling-person_id rule). '2025-0001' is the seeded student with a real
+  // linked Person, so the domain rule is actually exercised below.
+  const studentRow = rankUserRows.find((u) => u.username === '2025-0001');
+  expectEqual('a registrar account exists to target', Boolean(registrarRow), true);
+  expectEqual('a person-backed student account exists to target', Boolean(studentRow), true);
+
+  // NOTE: userStatusSchema declares `{ active: boolean }` — NOT `is_active`.
+  // Sending the wrong key yields a 422 that looks like an authorization pass.
+  await check(
+    'hr cannot deactivate a peer registrar',
+    hr, 'PATCH', `/users/${registrarRow!.id}/status`, FORBIDDEN, { active: false }
+  );
+  await check(
+    'superadmin cannot deactivate a peer superadmin',
+    superadmin, 'PATCH', `/users/${rankUserRows.find((u) => u.role === 'superadmin')!.id}/status`,
+    FORBIDDEN, { active: false }
+  );
+  // DOMAIN WINS over rank on this toggle. HR outranks a student account, but
+  // the toggle also writes that student's Person, which HR may not write. All
+  // four of these are needed: any one alone passes against a rank-only build.
+  const staffRow = rankUserRows.find((u) => u.username === 'EMP-1001');
+  expectEqual('a staff account exists to target', Boolean(staffRow), true);
+
+  await check(
+    'hr may NOT deactivate a student account (domain)',
+    hr, 'PATCH', `/users/${studentRow!.id}/status`, FORBIDDEN, { active: false }
+  );
+  await check(
+    'registrar may NOT deactivate a staff account (domain)',
+    registrar, 'PATCH', `/users/${staffRow!.id}/status`, FORBIDDEN, { active: false }
+  );
+  await check(
+    'hr may deactivate a staff account',
+    hr, 'PATCH', `/users/${staffRow!.id}/status`, OK, { active: false }
+  );
+  await check(
+    'hr may reactivate that staff account',
+    hr, 'PATCH', `/users/${staffRow!.id}/status`, OK, { active: true }
+  );
+  await check(
+    'registrar may deactivate a student account',
+    registrar, 'PATCH', `/users/${studentRow!.id}/status`, OK, { active: false }
+  );
+  await check(
+    'registrar may reactivate that student account',
+    registrar, 'PATCH', `/users/${studentRow!.id}/status`, OK, { active: true }
+  );
+
+  // resetPassword writes no Person, so it is rank-only — a deliberate
+  // asymmetry, recorded in the spec. HR may reset a student's password.
+  await check(
+    'hr cannot reset passwords at all (superadmin-only route)',
+    hr, 'PATCH', `/users/${studentRow!.id}/password`, FORBIDDEN, { password: 'Verify@12345' }
+  );
+
+  // Self-targeting, for each staff-side role.
+  for (const [name, token] of [
+    ['superadmin', superadmin], ['registrar', registrar], ['hr', hr], ['oss', oss],
+  ] as const) {
+    const me = rankUserRows.find((u) => u.username === (
+      name === 'superadmin' ? 'testadmin'
+      : name === 'registrar' ? 'testregistrar'
+      : name === 'hr' ? 'testhr' : 'testoss'
+    ));
+    expectEqual(`${name} account is listed`, Boolean(me), true);
+    await check(`${name} cannot deactivate itself`, token, 'PATCH', `/users/${me!.id}/status`, FORBIDDEN, { active: false });
+  }
+
+  // OSS has no person domain, so it cannot create a login attached to a
+  // person. GET /persons is registrar/superadmin-only in this codebase (that
+  // route's own guard is untouched by this task), so a superadmin resolves
+  // the person id here — the thing under test is POST /users, not read
+  // access to /persons.
+  const personsForAttach = await request(superadmin, 'GET', '/persons?limit=1');
+  const firstPerson = ((personsForAttach.json.data as { _id?: string; id?: string }[]) ?? [])[0];
+  expectEqual('a person exists to attach', Boolean(firstPerson), true);
+  await check('oss cannot create a login for a person', oss, 'POST', '/users', FORBIDDEN, {
+    username: 'rbac-oss-login', password: 'Verify@12345', role: 'student',
+    person_id: String(firstPerson!._id ?? firstPerson!.id),
+  });
+
+  // Bulk: a filter that WOULD match a peer must leave that peer untouched, and
+  // preview must agree with apply. Asserting only the response count would pass
+  // against an implementation that excluded nothing.
+  //
+  // An UNFILTERED scan, not a `search` term, is what exercises this: every
+  // seeded Person's full_name/id_number/rfid_uid is substring-clean (no
+  // shared token across student and staff records), so any non-empty
+  // `type`/`department_section`/`search` filter resolves through
+  // buildFilter's person_id $in [...] and structurally can never surface a
+  // person-less peer account (superadmin/registrar/hr/oss all have
+  // person_id: null). `filter: {}` skips that person_id narrowing entirely,
+  // so peers and out-of-domain persons alike are real bulk candidates and
+  // the exclusion loop actually has something to exclude.
+  const rankPreview = await request(hr, 'GET', '/users/bulk-status/preview');
+  const rankPreviewBody = rankPreview.json.data as { matched?: number; excluded?: number };
+  expectEqual('preview returns a matched count', typeof rankPreviewBody?.matched, 'number');
+  expectEqual('preview excludes at least the peers and self', (rankPreviewBody?.excluded ?? 0) > 0, true);
+
+  // bulkStatusSchema declares `{ active: boolean, filter: bulkFilterSchema }`,
+  // and bulkFilterSchema accepts only `type`, `department_section`, `search`,
+  // each a plain string.
+  const rankApplied = await request(hr, 'POST', '/users/bulk-status', { active: false, filter: {} });
+  const rankAppliedBody = rankApplied.json.data as { matched?: number; excluded?: number };
+  expectEqual('bulk apply matched equals preview matched', rankAppliedBody?.matched, rankPreviewBody?.matched);
+  expectEqual('bulk apply excluded equals preview excluded', rankAppliedBody?.excluded, rankPreviewBody?.excluded);
+
+  // Re-read BOTH a peer and a student. Asserting only the response counts would
+  // pass against an implementation that excluded nothing, and checking only the
+  // peer would pass against a role-only predicate that still swept every
+  // student on campus — the worst hole in this subsystem.
+  const rankAfterBulk = await request(superadmin, 'GET', '/users?limit=100');
+  const rankAfterRows = (rankAfterBulk.json.data as { id: string; is_active: boolean }[]) ?? [];
+  expectEqual('post-bulk user list is non-empty', rankAfterRows.length > 0, true);
+  expectEqual(
+    'peer registrar survives hr bulk deactivate',
+    rankAfterRows.find((u) => u.id === registrarRow!.id)?.is_active,
+    true
+  );
+  expectEqual(
+    'out-of-domain student survives hr bulk deactivate',
+    rankAfterRows.find((u) => u.id === studentRow!.id)?.is_active,
+    true
+  );
+
+  // Restore anything the bulk actually deactivated. Use superadmin (every
+  // domain) with the same unfiltered scan so the restore isn't itself
+  // limited by hr's write domain.
+  await request(superadmin, 'POST', '/users/bulk-status', { active: true, filter: {} });
 
   summary();
 }

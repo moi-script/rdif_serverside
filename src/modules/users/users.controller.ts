@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { sendSuccess } from '../../utils/ApiResponse';
+import { actorOf } from '../../utils/authority';
 import { userService } from './users.service';
 
 export const userController = {
@@ -9,18 +10,21 @@ export const userController = {
     sendSuccess(res, items, 200, meta);
   }),
   create: asyncHandler(async (req: Request, res: Response) => {
-    sendSuccess(res, await userService.create(req.body, req.user!.role), 201);
+    sendSuccess(res, await userService.create(req.body, actorOf(req)), 201);
   }),
   resetPassword: asyncHandler(async (req: Request, res: Response) => {
-    sendSuccess(res, await userService.resetPassword(req.params.id, req.body.password));
+    sendSuccess(
+      res,
+      await userService.resetPassword(req.params.id, req.body.password, actorOf(req))
+    );
   }),
   remove: asyncHandler(async (req: Request, res: Response) => {
-    sendSuccess(res, await userService.softDelete(req.params.id, req.user!.userId));
+    sendSuccess(res, await userService.softDelete(req.params.id, actorOf(req)));
   }),
   setStatus: asyncHandler(async (req: Request, res: Response) => {
     sendSuccess(
       res,
-      await userService.setStatus(req.params.id, req.body.active, req.user!.userId)
+      await userService.setStatus(req.params.id, req.body.active, actorOf(req))
     );
   }),
   bulkPreview: asyncHandler(async (req: Request, res: Response) => {
@@ -32,20 +36,14 @@ export const userController = {
       res,
       await userService.bulkPreview(
         { type: q.type, department_section: q.department_section, search: q.search },
-        req.user!.userId,
-        req.user!.role
+        actorOf(req)
       )
     );
   }),
   bulkSetStatus: asyncHandler(async (req: Request, res: Response) => {
     sendSuccess(
       res,
-      await userService.bulkSetStatus(
-        req.body.active,
-        req.body.filter ?? {},
-        req.user!.userId,
-        req.user!.role
-      )
+      await userService.bulkSetStatus(req.body.active, req.body.filter ?? {}, actorOf(req))
     );
   }),
 };

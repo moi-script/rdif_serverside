@@ -16,16 +16,13 @@ export const userRoutes = Router();
 
 userRoutes.use(authenticate);
 
-// Registrar may create logins and check for duplicates.
-userRoutes.get('/', authorize(ROLES.SUPERADMIN, ROLES.REGISTRAR), userController.list);
-userRoutes.post(
-  '/',
-  authorize(ROLES.SUPERADMIN, ROLES.REGISTRAR),
-  validate(createUserSchema),
-  userController.create
-);
+const STAFF_SIDE_GUARD = authorize(ROLES.SUPERADMIN, ROLES.REGISTRAR, ROLES.HR, ROLES.OSS);
 
-// Superadmin only.
+userRoutes.get('/', STAFF_SIDE_GUARD, userController.list);
+userRoutes.post('/', STAFF_SIDE_GUARD, validate(createUserSchema), userController.create);
+
+// Superadmin only: deletion was not granted to admins, and superadmins are
+// promoted by `npm run grant:superadmin`, never over the API.
 userRoutes.patch(
   '/:id/password',
   authorize(ROLES.SUPERADMIN),
@@ -34,24 +31,24 @@ userRoutes.patch(
 );
 userRoutes.delete('/:id', authorize(ROLES.SUPERADMIN), userController.remove);
 
-// Bulk routes must be registered above `/:id/status` — Express matches in
-// declaration order, and `bulk-status` would otherwise be captured by `:id`.
+// Bulk routes stay above `/:id/status` — Express matches in declaration
+// order, and `bulk-status` would otherwise be captured by `:id`.
 userRoutes.get(
   '/bulk-status/preview',
-  authorize(ROLES.SUPERADMIN),
+  STAFF_SIDE_GUARD,
   validate(bulkFilterSchema, 'query'),
   userController.bulkPreview
 );
 userRoutes.post(
   '/bulk-status',
-  authorize(ROLES.SUPERADMIN),
+  STAFF_SIDE_GUARD,
   validate(bulkStatusSchema),
   userController.bulkSetStatus
 );
 
 userRoutes.patch(
   '/:id/status',
-  authorize(ROLES.SUPERADMIN),
+  STAFF_SIDE_GUARD,
   validate(userStatusSchema),
   userController.setStatus
 );

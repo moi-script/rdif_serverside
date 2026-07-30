@@ -1,9 +1,30 @@
 import { ApiError } from './ApiError';
 import { Role, Domain, rankOf, WRITE_DOMAINS } from '../constants/roles';
+import { AuthUser } from '../types';
 
 export interface Actor {
   id: string;
   role: Role;
+}
+
+/**
+ * Builds the Actor from the authenticated request. `authenticate.ts` sets
+ * `req.user = { userId, role, personId }` — the id property is `userId`, not
+ * `id`. Shared here so every controller (and every future one) builds the
+ * same shape instead of re-deriving it.
+ *
+ * Typed against a minimal `{ user?: AuthUser }` shape rather than
+ * express.Request: express.Request's `user` field only exists via the global
+ * augmentation in `src/types/express.d.ts`, which is a module (not a bare
+ * ambient .d.ts) and so is only merged into the program when something
+ * imports it. Standalone ts-node entry points such as verifyRoles.ts never
+ * reach that file through their import graph, so depending on the
+ * augmentation here would make this function fail to typecheck outside the
+ * full server build. AuthUser already has the exact fields needed.
+ */
+export function actorOf(req: { user?: AuthUser }): Actor {
+  if (!req.user) throw new ApiError('UNAUTHORIZED');
+  return { id: req.user.userId, role: req.user.role };
 }
 
 /**
