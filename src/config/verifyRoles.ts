@@ -13,6 +13,7 @@ import {
   WRITE_DOMAINS,
   rankOf,
   rolesBelow,
+  bulkEligibleRoles,
   personDomain,
   type Role,
 } from '../constants/roles';
@@ -134,6 +135,29 @@ async function main(): Promise<void> {
   expectEqual('hr does not outrank oss', belowHr.includes(ROLES.OSS), false);
   expectEqual('hr outranks student', belowHr.includes(ROLES.STUDENT), true);
   expectEqual('student outranks nobody', rolesBelow(ROLES.STUDENT).length, 0);
+
+  // bulkEligibleRoles is NOT rolesBelow: it also floors out every rank-2
+  // account, regardless of actor. A superadmin's bulk action must never be
+  // able to sweep registrar/hr/oss just because they outrank them.
+  const bulkFromSuper = bulkEligibleRoles(ROLES.SUPERADMIN);
+  expectEqual('superadmin bulk-eligible roles: exactly two', bulkFromSuper.length, 2);
+  expectEqual('superadmin bulk-eligible includes staff', bulkFromSuper.includes(ROLES.STAFF), true);
+  expectEqual('superadmin bulk-eligible includes student', bulkFromSuper.includes(ROLES.STUDENT), true);
+  expectEqual(
+    'superadmin bulk-eligible excludes registrar, hr, oss, and self',
+    bulkFromSuper.includes(ROLES.REGISTRAR) ||
+      bulkFromSuper.includes(ROLES.HR) ||
+      bulkFromSuper.includes(ROLES.OSS) ||
+      bulkFromSuper.includes(ROLES.SUPERADMIN),
+    false
+  );
+
+  const bulkFromHr = bulkEligibleRoles(ROLES.HR);
+  expectEqual('hr bulk-eligible roles: exactly two (floor changes nothing at rank 2)', bulkFromHr.length, 2);
+  expectEqual('hr bulk-eligible includes staff', bulkFromHr.includes(ROLES.STAFF), true);
+  expectEqual('hr bulk-eligible includes student', bulkFromHr.includes(ROLES.STUDENT), true);
+
+  expectEqual('student bulk-eligible roles: none', bulkEligibleRoles(ROLES.STUDENT).length, 0);
 
   // Exhaustiveness: a role missing from either table is a runtime hole, not a
   // type error, because Record<Role, T> is satisfied by a cast anywhere upstream.
@@ -545,15 +569,17 @@ async function main(): Promise<void> {
     true
   );
 
-  // Only accounts at or above the actor's own rank survive an unfiltered bulk
-  // deactivate. Under the old flat BULK_PROTECTED list, registrar was named
-  // explicitly and always survived a superadmin's bulk deactivate. Task 1
-  // replaces that list with rolesBelow(actor): registrar (rank 2) is
-  // strictly below superadmin (rank 3), so it is now IN scope for a
-  // superadmin's bulk action — only other rank-3 accounts (and the acting
-  // user) are excluded. This is a deliberate reversal, documented in
-  // docs/superpowers/specs/2026-07-30-rbac-v2-design.md ("Deliberate
-  // reversals"), not a regression.
+  // Every rank-2-or-above account survives an unfiltered bulk deactivate,
+  // regardless of who runs it — not just peers of the actor. rolesBelow()
+  // alone would let a superadmin's bulk action sweep registrar (and, once
+  // seeded, hr/oss) accounts just because they outrank them: that is a
+  // blast-radius safety property, not a peer-protection one, and the two
+  // must not be conflated. bulkEligibleRoles() floors bulk targets at rank 1
+  // (staff/student) for every actor, so registrar survives here for the same
+  // reason it always did — this is a derived rank floor now, not a
+  // hand-maintained name list, so it cannot go stale when a role is added.
+  // An admin account can still be deactivated, just never via a filter:
+  // PATCH /users/:id/status names a specific target instead.
   const bulkAll = await request(superadmin, 'POST', '/users/bulk-status', {
     active: false,
     filter: {},
@@ -571,9 +597,9 @@ async function main(): Promise<void> {
     true
   );
   expectEqual(
-    'registrar deactivated by superadmin bulk deactivate-all (rank, not name, decides)',
+    'registrar still active after deactivate-all (rank floor, not name list)',
     allRows.find((u) => u.username === 'testregistrar')?.is_active,
-    false
+    true
   );
   expectEqual('exclusions were counted', bulkAllData.excluded >= 2, true);
 

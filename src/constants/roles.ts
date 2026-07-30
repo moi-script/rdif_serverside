@@ -66,6 +66,22 @@ export function rolesBelow(actor: Role): Role[] {
 }
 
 /**
+ * Roles a bulk action may touch: strictly below the actor AND never an admin.
+ *
+ * rolesBelow() alone is NOT the bulk predicate. The former BULK_PROTECTED list
+ * did two jobs, and only one was peer protection: it also kept a SUPERADMIN's
+ * bulk action off registrar accounts. Without the rank floor here, one
+ * mis-filtered "Deactivate All" disables every Registrar, HR, and OSS account
+ * at once, leaving only the acting superadmin.
+ *
+ * Still derived from RANK, so unlike the hand-maintained list it replaced, it
+ * cannot go stale when a role is added.
+ */
+export function bulkEligibleRoles(actor: Role): Role[] {
+  return rolesBelow(actor).filter((r) => RANK[r] < 2);
+}
+
+/**
  * Which record classes each role may create, edit, and deactivate.
  *
  * Reads are deliberately NOT restricted here: Vehicle.owner_person_id

@@ -4,7 +4,7 @@ import { userRepo, UserListQuery } from './users.repository';
 import { IUser, UserModel } from './users.model';
 import { ApiError } from '../../utils/ApiError';
 import { getPagination, buildMeta } from '../../utils/pagination';
-import { Role, rolesBelow } from '../../constants/roles';
+import { Role, rolesBelow, bulkEligibleRoles } from '../../constants/roles';
 import { personRepo } from '../persons/persons.repository';
 import { PersonModel } from '../persons/persons.model';
 
@@ -173,7 +173,7 @@ export const userService = {
     const base = await userRepo.buildFilter(query);
     const candidates = await UserModel.find(base).select('_id role').lean();
 
-    const below = rolesBelow(actorRole);
+    const below = bulkEligibleRoles(actorRole);
 
     const targets: string[] = [];
     let excluded = 0;
