@@ -37,6 +37,25 @@ export function installVerifyBypass(): void {
   const originalFetch = globalThis.fetch;
 
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    // globalThis.fetch's first parameter is typed RequestInfo | URL, where
+    // RequestInfo = Request | string. Only the string/URL form carries its
+    // headers in `init`, which is the only place this wrapper looks — a
+    // Request object carries its own Headers internally, and
+    // `init?.headers` would be undefined for a call built that way. Merging
+    // in that case would silently fall back to `new Headers({})` and drop
+    // every header the caller set on the Request (Authorization included),
+    // the exact defect class this whole module exists to eliminate. None of
+    // the 24 call sites in these four harnesses use the Request form today,
+    // so failing loudly here costs nothing and catches it immediately if
+    // one ever does.
+    if (typeof input !== 'string' && !(input instanceof URL)) {
+      throw new Error(
+        'verifyBypass: fetch was called with a Request object. The harness bypass ' +
+          'wrapper only merges headers for the fetch(url, init) form, so a Request ' +
+          'would silently lose its headers. Use fetch(url, init) instead.'
+      );
+    }
+
     // `new Headers(...)` accepts every shape a caller in these files uses —
     // a plain Record<string, string>, an array of [name, value] tuples, an
     // existing Headers instance, or undefined — and normalizes them into one
