@@ -3,6 +3,7 @@ import { Types } from 'mongoose';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { sendSuccess } from '../../utils/ApiResponse';
 import { ApiError } from '../../utils/ApiError';
+import { actorOf } from '../../utils/authority';
 import { personService } from './persons.service';
 import { dashboardService } from '../dashboard/dashboard.service';
 import { personPhotoService } from './personPhotos.service';
@@ -35,19 +36,19 @@ export const personController = {
     sendSuccess(res, await personService.get(req.params.id));
   }),
   create: asyncHandler(async (req: Request, res: Response) => {
-    sendSuccess(res, await personService.create(req.body), 201);
+    sendSuccess(res, await personService.create(req.body, actorOf(req)), 201);
   }),
   import: asyncHandler(async (req: Request, res: Response) => {
-    sendSuccess(res, await personService.import(req.body.rows), 201);
+    sendSuccess(res, await personService.import(req.body.rows, actorOf(req)), 201);
   }),
   update: asyncHandler(async (req: Request, res: Response) => {
-    sendSuccess(res, await personService.update(req.params.id, req.body));
+    sendSuccess(res, await personService.update(req.params.id, req.body, actorOf(req)));
   }),
   setStatus: asyncHandler(async (req: Request, res: Response) => {
-    sendSuccess(res, await personService.setStatus(req.params.id, req.body.status));
+    sendSuccess(res, await personService.setStatus(req.params.id, req.body.status, actorOf(req)));
   }),
   reassignRfid: asyncHandler(async (req: Request, res: Response) => {
-    sendSuccess(res, await personService.reassignRfid(req.params.id, req.body.rfid_uid));
+    sendSuccess(res, await personService.reassignRfid(req.params.id, req.body.rfid_uid, actorOf(req)));
   }),
   uploadPhoto: asyncHandler(async (req: Request, res: Response) => {
     sendSuccess(res, await personPhotoService.upload(req.params.id, req.file), 201);

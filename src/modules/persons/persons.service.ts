@@ -3,6 +3,8 @@ import { personRepo } from './persons.repository';
 import { IPerson } from './persons.model';
 import { ApiError } from '../../utils/ApiError';
 import { getPagination, buildMeta } from '../../utils/pagination';
+import { personDomain } from '../../constants/roles';
+import { Actor, assertCanWrite } from '../../utils/authority';
 
 interface ListQuery {
   page?: string;
@@ -70,7 +72,10 @@ export const personService = {
     return person;
   },
 
-  async create(data: Partial<IPerson>) {
+  async create(data: Partial<IPerson>, actor: Actor) {
+    if (!data.type) throw new ApiError('VALIDATION_ERROR', 'type is required');
+    assertCanWrite(actor, personDomain(data.type));
+
     if (data.id_number) {
       const dup = await personRepo.findByIdNumber(data.id_number);
       if (dup) throw new ApiError('DUPLICATE_ID');
@@ -84,41 +89,59 @@ export const personService = {
     return personRepo.create(data);
   },
 
-  async import(rows: Partial<IPerson>[]) {
+  async import(rows: Partial<IPerson>[], actor: Actor) {
     const skipped: { row: number; reason: string }[] = [];
     let created = 0;
     for (let i = 0; i < rows.length; i++) {
       try {
-        await this.create(rows[i]);
+        await this.create(rows[i], actor);
         created++;
       } catch (err) {
         const reason =
-          err instanceof ApiError && err.code === 'DUPLICATE_ID'
-            ? 'id_number already registered'
-            : err instanceof ApiError && err.code === 'DUPLICATE_RFID'
-              ? 'rfid_uid already registered'
-              : (err as { code?: number }).code === 11000
-                ? 'duplicate key (id_number or rfid_uid)'
-                : (err as Error).message;
+          err instanceof ApiError && err.code === 'FORBIDDEN'
+            ? 'your role cannot register this person type'
+            : err instanceof ApiError && err.code === 'DUPLICATE_ID'
+              ? 'id_number already registered'
+              : err instanceof ApiError && err.code === 'DUPLICATE_RFID'
+                ? 'rfid_uid already registered'
+                : (err as { code?: number }).code === 11000
+                  ? 'duplicate key (id_number or rfid_uid)'
+                  : (err as Error).message;
         skipped.push({ row: i + 1, reason });
       }
     }
     return { created, skipped };
   },
 
-  async update(id: string, data: Partial<IPerson>) {
+  /**
+   * A type change moves a record BETWEEN domains, so both sides are checked.
+   *
+   * Checking one direction only leaves the other open: check the incoming type
+   * alone and a registrar can claim a staff record by retyping it to student;
+   * check the existing type alone and a registrar can push a student out to
+   * staff, beyond their own reach and into HR's without HR knowing.
+   */
+  async update(id: string, data: Partial<IPerson>, actor: Actor) {
+    const existing = await personRepo.findById(id);
+    if (!existing) throw new ApiError('NOT_FOUND', 'Person not found');
+
+    assertCanWrite(actor, personDomain(existing.type));
+    if (data.type && data.type !== existing.type) {
+      assertCanWrite(actor, personDomain(data.type));
+    }
+
     const updated = await personRepo.updateById(id, data);
     if (!updated) throw new ApiError('NOT_FOUND', 'Person not found');
     return updated;
   },
 
-  async setStatus(id: string, status: 'active' | 'inactive') {
-    return this.update(id, { status });
+  async setStatus(id: string, status: 'active' | 'inactive', actor: Actor) {
+    return this.update(id, { status }, actor);
   },
 
-  async reassignRfid(id: string, rfid_uid: string) {
+  async reassignRfid(id: string, rfid_uid: string, actor: Actor) {
     const clash = await personRepo.findByRfid(rfid_uid);
     if (clash && String(clash._id) !== id) throw new ApiError('DUPLICATE_RFID');
-    return this.update(id, { rfid_uid });
+    return this.update(id, { rfid_uid }, actor);
   },
 };

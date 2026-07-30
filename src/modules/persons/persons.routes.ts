@@ -38,7 +38,14 @@ personRoutes.post(
 );
 personRoutes.delete('/:id/signature', authenticate, personController.deleteSignature);
 
-personRoutes.use(authenticate, authorize(ROLES.SUPERADMIN, ROLES.REGISTRAR));
+// All four staff-side roles may READ. Write authority is enforced per-verb in
+// the service by assertCanWrite: OSS gets in here for the vehicle owner picker
+// and is denied every person write, because WRITE_DOMAINS.oss has no person:*
+// entry. The route guard and the domain guard do different jobs.
+personRoutes.use(
+  authenticate,
+  authorize(ROLES.SUPERADMIN, ROLES.REGISTRAR, ROLES.HR, ROLES.OSS)
+);
 
 personRoutes.get('/', personController.list);
 personRoutes.get('/sections', personController.sections);
@@ -52,10 +59,12 @@ personRoutes.patch('/:id/rfid', validate(reassignRfidSchema), personController.r
 personRoutes.post('/:id/photo', uploadPhoto, personController.uploadPhoto);
 personRoutes.delete('/:id/photo', personController.deletePhoto);
 
-// Superadmin only — activation is not a registrar action.
+// Same four staff-side roles as the router guard above — status is a write,
+// so domain scoping (via assertCanWrite in the service) is what actually
+// restricts it, not this route guard.
 personRoutes.patch(
   '/:id/status',
-  authorize(ROLES.SUPERADMIN),
+  authorize(ROLES.SUPERADMIN, ROLES.REGISTRAR, ROLES.HR, ROLES.OSS),
   validate(statusSchema),
   personController.setStatus
 );

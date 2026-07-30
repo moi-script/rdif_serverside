@@ -1024,10 +1024,10 @@ async function main(): Promise<void> {
   }
 
   // OSS has no person domain, so it cannot create a login attached to a
-  // person. GET /persons is registrar/superadmin-only in this codebase (that
-  // route's own guard is untouched by this task), so a superadmin resolves
-  // the person id here — the thing under test is POST /users, not read
-  // access to /persons.
+  // person. GET /persons is readable by all four staff-side roles (see the
+  // "person write domains" block below), so which token resolves the person
+  // id here doesn't matter for this check — superadmin is used because the
+  // thing under test is POST /users, not read access to /persons.
   const personsForAttach = await request(superadmin, 'GET', '/persons?limit=1');
   const firstPerson = ((personsForAttach.json.data as { _id?: string; id?: string }[]) ?? [])[0];
   expectEqual('a person exists to attach', Boolean(firstPerson), true);
@@ -1084,6 +1084,83 @@ async function main(): Promise<void> {
   // domain) with the same unfiltered scan so the restore isn't itself
   // limited by hr's write domain.
   await request(superadmin, 'POST', '/users/bulk-status', { active: true, filter: {} });
+
+  console.log('\n== person write domains ==');
+
+  // Reads are shared — this is what lets OSS attach an owner to a vehicle.
+  await check('hr GET /persons', hr, 'GET', '/persons', OK);
+  await check('oss GET /persons', oss, 'GET', '/persons', OK);
+
+  // There is NO DELETE /persons/:id route, so probe rows cannot be cleaned up.
+  // The harness's existing convention (see the throwaway block near line 625)
+  // is a timestamp-suffixed id_number and RFID, never a seeded fixture: rows
+  // accumulate but every run is independent, and the printed check labels stay
+  // static so output remains byte-identical.
+  const rbacStamp = Date.now();
+  const probeStudentId = `verify-rbac-s-${rbacStamp}`;
+  const probeStaffId = `verify-rbac-t-${rbacStamp}`;
+  const probeStudentRfid = 'BEEF' + (rbacStamp % 0xffff).toString(16).toUpperCase().padStart(4, '0');
+  const probeStaffRfid = 'CAFE' + (rbacStamp % 0xffff).toString(16).toUpperCase().padStart(4, '0');
+
+  // Writes are scoped.
+  const madeStudentPerson = await request(registrar, 'POST', '/persons', {
+    full_name: 'RBAC Probe Student', type: 'student',
+    id_number: probeStudentId, department_section: 'BSIT 4-A', rfid_uid: probeStudentRfid,
+  });
+  expectEqual('registrar may create a student', madeStudentPerson.status, 201);
+
+  await check('registrar may NOT create a staff person', registrar, 'POST', '/persons', FORBIDDEN, {
+    full_name: 'RBAC Probe Staff', type: 'staff',
+    id_number: probeStaffId, department_section: 'Registrar Office', rfid_uid: probeStaffRfid,
+  });
+
+  const madeStaff = await request(hr, 'POST', '/persons', {
+    full_name: 'RBAC Probe Staff', type: 'staff',
+    id_number: probeStaffId, department_section: 'Registrar Office', rfid_uid: probeStaffRfid,
+  });
+  expectEqual('hr may create a staff person', madeStaff.status, 201);
+
+  await check('hr may NOT create a student', hr, 'POST', '/persons', FORBIDDEN, {
+    full_name: 'RBAC Probe Student 2', type: 'student',
+    id_number: `${probeStudentId}-b`, department_section: 'BSIT 4-A',
+  });
+  await check('oss may NOT create any person', oss, 'POST', '/persons', FORBIDDEN, {
+    full_name: 'RBAC Probe OSS', type: 'student',
+    id_number: `${probeStudentId}-c`, department_section: 'BSIT 4-A',
+  });
+
+  // Type-change escalation, both directions.
+  const idOf = (r: { json: Record<string, unknown> }) => {
+    const d = r.json.data as { _id?: string; id?: string } | undefined;
+    return String(d?._id ?? d?.id ?? '');
+  };
+  const probeStudent = { _id: idOf(madeStudentPerson) };
+  const probeStaff = { _id: idOf(madeStaff) };
+  expectEqual('probe student has an id', probeStudent._id.length > 0, true);
+  expectEqual('probe staff has an id', probeStaff._id.length > 0, true);
+
+  await check(
+    'registrar cannot push a student out of its domain',
+    registrar, 'PATCH', `/persons/${probeStudent!._id}`, FORBIDDEN, { type: 'staff' }
+  );
+  await check(
+    'registrar cannot claim a staff record by retyping it',
+    registrar, 'PATCH', `/persons/${probeStaff!._id}`, FORBIDDEN, { type: 'student' }
+  );
+  await check(
+    'registrar may still edit a student in-domain',
+    registrar, 'PATCH', `/persons/${probeStudent!._id}`, OK, { department_section: 'BSIT 4-B' }
+  );
+
+  // Status is a write, so it is domain-scoped too.
+  await check(
+    'hr may deactivate a staff person',
+    hr, 'PATCH', `/persons/${probeStaff!._id}/status`, OK, { status: 'inactive' }
+  );
+  await check(
+    'hr may NOT deactivate a student person',
+    hr, 'PATCH', `/persons/${probeStudent!._id}/status`, FORBIDDEN, { status: 'inactive' }
+  );
 
   summary();
 }
