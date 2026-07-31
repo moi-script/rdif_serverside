@@ -186,9 +186,9 @@ export const dashboardService = {
 
   async userView(personId: string) {
     const oid = new Types.ObjectId(personId);
-    const [person, vehicle, today, recent, statusAgg, scans] = await Promise.all([
+    const [person, vehicles, today, recent, statusAgg, scans] = await Promise.all([
       PersonModel.findById(personId).lean(),
-      VehicleModel.findOne({ owner_person_id: personId }).lean(),
+      VehicleModel.find({ owner_person_id: personId }).sort({ createdAt: -1 }).lean(),
       AttendanceModel.findOne({ person_id: personId, date: todayKey() }).lean(),
       AttendanceModel.find({ person_id: personId }).sort({ date: -1 }).limit(7).lean(),
       AttendanceModel.aggregate([
@@ -237,15 +237,13 @@ export const dashboardService = {
         : null,
       attendance_summary,
       recent_attendance: recent,
-      vehicle: vehicle
-        ? {
-            plate_number: vehicle.plate_number,
-            vehicle_type: vehicle.vehicle_type,
-            vehicle_model: vehicle.vehicle_model ?? null,
-            rfid_uid: vehicle.rfid_uid,
-            status: vehicle.status,
-          }
-        : null,
+      vehicles: vehicles.map((vehicle) => ({
+        plate_number: vehicle.plate_number,
+        vehicle_type: vehicle.vehicle_type,
+        vehicle_model: vehicle.vehicle_model ?? null,
+        rfid_uid: vehicle.rfid_uid,
+        status: vehicle.status,
+      })),
       recent_scans: scans,
     };
   },

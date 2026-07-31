@@ -4,6 +4,7 @@ import { IVehicle } from './vehicles.model';
 import { ApiError } from '../../utils/ApiError';
 import { getPagination, buildMeta } from '../../utils/pagination';
 import { Actor, assertCanWrite } from '../../utils/authority';
+import { nextSchoolYearEnd } from '../../utils/schoolYear';
 
 interface ListQuery {
   page?: string;
@@ -28,11 +29,11 @@ export const vehicleService = {
   },
   async create(data: Partial<IVehicle>, actor: Actor) {
     assertCanWrite(actor, 'vehicle');
-    const existingOwner = await vehicleRepo.findByOwner(String(data.owner_person_id));
-    if (existingOwner) throw new ApiError('DUPLICATE_PLATE', 'Owner already has a vehicle');
     const existingRfid = await vehicleRepo.findByRfid(String(data.rfid_uid));
     if (existingRfid) throw new ApiError('DUPLICATE_RFID');
-    return vehicleRepo.create(data);
+    const existingPlate = await vehicleRepo.findByPlate(String(data.plate_number));
+    if (existingPlate) throw new ApiError('DUPLICATE_PLATE', 'Plate already registered');
+    return vehicleRepo.create({ ...data, valid_until: data.valid_until ?? nextSchoolYearEnd() });
   },
   async update(id: string, data: Partial<IVehicle>, actor: Actor) {
     assertCanWrite(actor, 'vehicle');

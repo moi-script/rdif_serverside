@@ -96,6 +96,19 @@ node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
   server serving taps mid-rebuild admits everyone, since every card looks
   like a first entry. Take the gate offline for the rebuild window, or accept
   that every tap during it is treated as a fresh entry.
+- **A second vehicle for the same owner is rejected as a duplicate, or a
+  `POST /vehicles` for someone who already has a pass throws `DUPLICATE_PLATE`
+  with the message "Owner already has a vehicle" even though the plate and
+  RFID are both unused.** A pre-existing `owner_person_id_1` unique index on
+  the `vehicles` collection silently enforces a one-vehicle-per-person rule
+  that the schema no longer declares — Mongoose does not drop an existing
+  index just because `unique: true` was removed from the schema definition.
+  Drop it explicitly:
+  ```bash
+  mongosh ncst_rfid --quiet --eval 'db.vehicles.dropIndex("owner_person_id_1")'
+  ```
+  Confirm with `db.vehicles.getIndexes()` that `owner_person_id_1` is gone
+  (only `_id_`, `plate_number_1`, and `rfid_uid_1` should remain unique).
 - **A `verify:*` run reports 429s, or `verify:passback` dies with
   `TypeError: Cannot read properties of undefined (reading 'find')`.** All
   four `verify:*` harnesses send `X-Verify-Bypass: $VERIFY_BYPASS_TOKEN` on

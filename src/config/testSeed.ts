@@ -11,6 +11,7 @@ import { ScanLogModel } from '../modules/scan/scan.model';
 import { PersonPhotoModel } from '../modules/persons/personPhotos.model';
 import { GateKeyModel } from '../modules/gates/gateKeys.model';
 import { ROLES } from '../constants/roles';
+import { nextSchoolYearEnd } from '../utils/schoolYear';
 
 /**
  * Hardcoded test accounts + demo activity for the testing phase.
@@ -166,23 +167,33 @@ async function seedDemoActivity(persons: IPerson[]): Promise<void> {
     gateMap[g.name] = gate._id;
   }
 
-  // Vehicles for a couple of people (idempotent by owner)
-  const vehicleOwners: { id_number: string; plate: string; rfid: string; type: string; model: string }[] = [
-    { id_number: '2025-0001', plate: 'NCST-1234', rfid: 'E5F6A7B8', type: 'Motorcycle', model: 'Honda Click 125i' },
-    { id_number: 'EMP-1001', plate: 'NCST-5678', rfid: 'F6A7B8C9', type: 'Car', model: 'Toyota Vios' },
+  // Vehicles for a couple of people (idempotent by plate_number, which is
+  // unique — not by owner, since an owner may now hold several vehicles).
+  const vehicleOwners: {
+    id_number: string;
+    plate: string;
+    rfid: string;
+    type: 'motorcycle' | 'car' | 'tricycle' | 'other';
+    make: string;
+    model: string;
+  }[] = [
+    { id_number: '2025-0001', plate: 'NCST-1234', rfid: 'E5F6A7B8', type: 'motorcycle', make: 'Honda', model: 'Click 125i' },
+    { id_number: 'EMP-1001', plate: 'NCST-5678', rfid: 'F6A7B8C9', type: 'car', make: 'Toyota', model: 'Vios' },
   ];
   const vehicleDocs: { rfid: string; ownerId: Types.ObjectId }[] = [];
   for (const v of vehicleOwners) {
     const owner = persons.find((p) => p.id_number === v.id_number);
     if (!owner) continue;
-    let vehicle = await VehicleModel.findOne({ owner_person_id: owner._id });
+    let vehicle = await VehicleModel.findOne({ plate_number: v.plate });
     if (!vehicle) {
       vehicle = await VehicleModel.create({
         owner_person_id: owner._id,
         plate_number: v.plate,
         rfid_uid: v.rfid,
         vehicle_type: v.type,
+        make: v.make,
         vehicle_model: v.model,
+        valid_until: nextSchoolYearEnd(),
         status: 'active',
       });
       console.log(`[test-seed] created vehicle '${v.plate}' for ${owner.full_name}`);

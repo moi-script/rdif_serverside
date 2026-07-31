@@ -184,6 +184,8 @@ function summary(): void {
 
 const OK = 200;
 const FORBIDDEN = 403;
+const CREATED = 201;
+const CONFLICT = 409;
 
 async function runChecks(): Promise<void> {
   console.log('\n== rate-limit bypass guard fails closed ==');
@@ -519,7 +521,6 @@ async function runChecks(): Promise<void> {
   await check('student GET /users denied', student, 'GET', '/users', FORBIDDEN);
 
   console.log('\n== user creation is role-aware ==');
-  const CREATED = 201;
   const stamp = Date.now();
 
   // Registrar may create a student login. This account is never touched
@@ -1466,14 +1467,14 @@ async function runChecks(): Promise<void> {
   await check('oss GET /vehicles', oss, 'GET', '/vehicles', OK);
   await check('student GET /vehicles denied', student, 'GET', '/vehicles', FORBIDDEN);
 
-  // Vehicle.owner_person_id is UNIQUE and there is NO DELETE /vehicles/:id
-  // route, so a probe vehicle cannot reuse an owner that already has one —
-  // create a fresh throwaway owner per run instead, same convention as the
-  // person probes above. cleanupProbes() below removes both this owner
-  // (id_number prefix already covered by PROBE_PERSON_ID_PREFIXES) and the
-  // vehicle itself (PROBE_VEHICLE_PLATE_PREFIX) at the end of the run — if
-  // you change the `verify-rbac-v-` or `RBAC-` prefix below, update the
-  // matching constant near cleanupProbes() too, or this starts leaking again.
+  // There is NO DELETE /vehicles/:id route, so a probe vehicle is never
+  // removed by the endpoint under test — create a fresh throwaway owner per
+  // run, same convention as the person probes above. cleanupProbes() below
+  // removes both this owner (id_number prefix already covered by
+  // PROBE_PERSON_ID_PREFIXES) and the vehicle itself
+  // (PROBE_VEHICLE_PLATE_PREFIX) at the end of the run — if you change the
+  // `verify-rbac-v-` or `RBAC-` prefix below, update the matching constant
+  // near cleanupProbes() too, or this starts leaking again.
   const vStamp = Date.now();
   const vSuffix = (vStamp % 0xffff).toString(16).toUpperCase().padStart(4, '0');
   const ownerRes = await request(superadmin, 'POST', '/persons', {
@@ -1490,8 +1491,9 @@ async function runChecks(): Promise<void> {
     owner_person_id: ownerId,
     plate_number: `RBAC-${vSuffix}`, // prefix: PROBE_VEHICLE_PLATE_PREFIX — keep these in sync
     rfid_uid: 'D0E1' + vSuffix,
-    vehicle_type: 'Motorcycle',
-    vehicle_model: 'Honda Adv',
+    vehicle_type: 'motorcycle',
+    make: 'Honda',
+    vehicle_model: 'Adv',
   };
 
   await check('registrar may NOT create a vehicle', registrar, 'POST', '/vehicles', FORBIDDEN, vehicleBody);
@@ -1511,6 +1513,56 @@ async function runChecks(): Promise<void> {
     'hr may NOT change vehicle status',
     hr, 'PATCH', `/vehicles/${vehicleId}/status`, FORBIDDEN, { status: 'active' }
   );
+
+  console.log('\n== a person may hold several vehicles ==');
+
+  const multiStamp = Date.now();
+  const multiSuffix = (multiStamp % 0xffff).toString(16).toUpperCase().padStart(4, '0');
+  const multiOwnerRes = await request(superadmin, 'POST', '/persons', {
+    full_name: 'RBAC Multi Owner',
+    type: 'student',
+    id_number: `verify-rbac-multi-${multiStamp}`, // prefix: PROBE_PERSON_ID_PREFIXES
+    department_section: 'BSIT 4-A',
+    rfid_uid: 'ACE0' + multiSuffix,
+  });
+  expectEqual('multi-vehicle owner created', multiOwnerRes.status, CREATED);
+  const multiOwner = multiOwnerRes.json.data as { _id?: string; id?: string } | undefined;
+  const multiOwnerId = String(multiOwner?._id ?? multiOwner?.id ?? '');
+  expectEqual('multi-vehicle owner has an id', multiOwnerId.length > 0, true);
+
+  const firstVehicle = await request(oss, 'POST', '/vehicles', {
+    owner_person_id: multiOwnerId,
+    plate_number: `RBAC-M1-${multiSuffix}`, // prefix: PROBE_VEHICLE_PLATE_PREFIXES
+    rfid_uid: 'BEE1' + multiSuffix,
+    vehicle_type: 'motorcycle',
+    make: 'Honda',
+  });
+  expectEqual('first vehicle for this owner', firstVehicle.status, CREATED);
+
+  // The whole point of dropping the unique index. Before it, this is a
+  // duplicate-key error or the service's own "Owner already has a vehicle".
+  const secondVehicle = await request(oss, 'POST', '/vehicles', {
+    owner_person_id: multiOwnerId,
+    plate_number: `RBAC-M2-${multiSuffix}`, // prefix: PROBE_VEHICLE_PLATE_PREFIXES
+    rfid_uid: 'BEE2' + multiSuffix,
+    vehicle_type: 'car',
+    make: 'Toyota',
+  });
+  expectEqual('a SECOND vehicle for the same owner is allowed', secondVehicle.status, CREATED);
+
+  // valid_until is defaulted, not left empty.
+  const secondBody = secondVehicle.json.data as { valid_until?: string } | undefined;
+  expectEqual('vehicle carries a valid_until', typeof secondBody?.valid_until, 'string');
+
+  // Uniqueness that must SURVIVE: plate and rfid.
+  const dupPlate = await request(oss, 'POST', '/vehicles', {
+    owner_person_id: multiOwnerId,
+    plate_number: `RBAC-M1-${multiSuffix}`,
+    rfid_uid: 'BEE3' + multiSuffix,
+    vehicle_type: 'car',
+    make: 'Nissan',
+  });
+  expectEqual('duplicate plate is still rejected', dupPlate.status, CONFLICT);
 
   console.log('\n== records (scan log) ==');
 

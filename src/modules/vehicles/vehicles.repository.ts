@@ -12,8 +12,8 @@ export const vehicleRepo = {
     return { items, total };
   },
   findById: (id: string) => VehicleModel.findById(id).lean(),
-  findByOwner: (owner_person_id: string) => VehicleModel.findOne({ owner_person_id }),
   findByRfid: (rfid_uid: string) => VehicleModel.findOne({ rfid_uid }),
+  findByPlate: (plate_number: string) => VehicleModel.findOne({ plate_number }),
   updateById: (id: string, data: Partial<IVehicle>) =>
     VehicleModel.findByIdAndUpdate(id, data, { new: true }).lean(),
 };
