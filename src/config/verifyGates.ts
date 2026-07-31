@@ -548,47 +548,79 @@ async function main(): Promise<void> {
   expectEqual(`seeded vehicle ${expiredUid} is present`, Boolean(expiredTarget), true);
   const originalValidUntil = expiredTarget!.valid_until;
 
-  const backdated = new Date(Date.now() - 86_400_000).toISOString();
-  const patched = await request(superadmin, 'PATCH', `/vehicles/${expiredTarget!._id}`, {
-    valid_until: backdated,
-  });
-  expectEqual('expiry was backdated', patched.status, 200);
+  // The backdate/restore pair below must never leave the seeded fixture
+  // (NCST-1234) permanently expired: a throw between them — an assertion
+  // helper misbehaving, a network hiccup — would otherwise strand it
+  // backdated forever, breaking every later run in a way that looks like a
+  // product bug rather than a harness bug. try/finally guarantees the
+  // restore PATCH runs on every exit path out of the try, thrown error
+  // included.
+  try {
+    const backdated = new Date(Date.now() - 86_400_000).toISOString();
+    const patched = await request(superadmin, 'PATCH', `/vehicles/${expiredTarget!._id}`, {
+      valid_until: backdated,
+    });
+    expectEqual('expiry was backdated', patched.status, 200);
 
-  const expiredTap = await tap(gateKey(parkingKey), { rfid_uid: expiredUid });
-  expectEqual(
-    'an expired pass is denied',
-    (expiredTap.json.data as { access_result?: string } | undefined)?.access_result,
-    'denied'
-  );
-  expectEqual(
-    'the denial reason is vehicle_expired',
-    (expiredTap.json.data as { reason?: string } | undefined)?.reason,
-    'vehicle_expired'
-  );
+    const expiredTap = await tap(gateKey(parkingKey), { rfid_uid: expiredUid });
+    expectEqual(
+      'an expired pass is denied',
+      (expiredTap.json.data as { access_result?: string } | undefined)?.access_result,
+      'denied'
+    );
+    expectEqual(
+      'the denial reason is vehicle_expired',
+      (expiredTap.json.data as { reason?: string } | undefined)?.reason,
+      'vehicle_expired'
+    );
 
-  // A denied tap must never move occupancy. Read the roster and confirm this
-  // vehicle is not on it. The occupancy projection does not expose entity_id
-  // (see occupancy.repository.ts listInside) — for a vehicle it projects the
-  // plate_number as `name`, so match on that instead.
-  const roster = await request(superadmin, 'GET', '/occupancy?limit=100');
-  const inside = (roster.json.data ?? []) as { entity_type?: string; name?: string }[];
-  expectEqual(
-    'an expired tap did not put the vehicle inside',
-    inside.some((r) => r.entity_type === 'vehicle' && r.name === 'NCST-1234'),
-    false
-  );
+    // A denied tap must never move occupancy. Read the roster and confirm this
+    // vehicle is not on it. The occupancy projection does not expose entity_id
+    // (see occupancy.repository.ts listInside) — for a vehicle it projects the
+    // plate_number as `name`, so match on that instead.
+    const roster = await request(superadmin, 'GET', '/occupancy?limit=100');
+    // Floor: `.some()` on an empty array is `false` no matter what actually
+    // happened, so a broken GET /occupancy that silently returns nothing
+    // would pass the negative check below vacuously. Assert the request
+    // itself succeeded before trusting an empty result to mean anything.
+    expectEqual('occupancy roster request succeeded', roster.status, 200);
+    const inside = (roster.json.data ?? []) as { entity_type?: string; name?: string }[];
+    expectEqual(
+      'an expired tap did not put the vehicle inside',
+      inside.some((r) => r.entity_type === 'vehicle' && r.name === 'NCST-1234'),
+      false
+    );
+  } finally {
+    const restoredPatch = await request(superadmin, 'PATCH', `/vehicles/${expiredTarget!._id}`, {
+      valid_until: originalValidUntil,
+    });
+    expectEqual('expiry restored', restoredPatch.status, 200);
+  }
 
-  // Restore, and prove the pass works again — which also proves the denial
-  // came from expiry rather than from some unrelated state.
-  const restoredPatch = await request(superadmin, 'PATCH', `/vehicles/${expiredTarget!._id}`, {
-    valid_until: originalValidUntil,
-  });
-  expectEqual('expiry restored', restoredPatch.status, 200);
+  // Prove the pass works again — which also proves the earlier denial came
+  // from expiry rather than from some unrelated state.
   const restoredTap = await tap(gateKey(parkingKey), { rfid_uid: expiredUid });
   expectEqual(
     'the pass works again once restored',
     (restoredTap.json.data as { access_result?: string } | undefined)?.access_result,
     'granted'
+  );
+
+  // The positive half of the occupancy-roster check. Without this, "an
+  // expired tap did not put the vehicle inside" above could pass even if
+  // GET /occupancy is completely broken and always returns an empty list —
+  // this proves the roster can actually see a vehicle that IS inside, so the
+  // negative check above means something.
+  const rosterAfterRestore = await request(superadmin, 'GET', '/occupancy?limit=100');
+  expectEqual('occupancy roster request succeeded after restore', rosterAfterRestore.status, 200);
+  const insideAfterRestore = (rosterAfterRestore.json.data ?? []) as {
+    entity_type?: string;
+    name?: string;
+  }[];
+  expectEqual(
+    'the restored grant DOES put the vehicle inside (roster floor)',
+    insideAfterRestore.some((r) => r.entity_type === 'vehicle' && r.name === 'NCST-1234'),
+    true
   );
 
   // The restored tap left the vehicle occupancy-'inside'. Release it here so

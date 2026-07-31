@@ -27,6 +27,7 @@ import { PersonModel } from '../modules/persons/persons.model';
 import { UserModel } from '../modules/users/users.model';
 import { VehicleModel } from '../modules/vehicles/vehicles.model';
 import { VehicleApplicationModel } from '../modules/vehicleApplications/vehicleApplications.model';
+import { ScanLogModel } from '../modules/scan/scan.model';
 import { ApplicationSignatureModel } from '../modules/vehicleApplications/applicationSignatures.model';
 import { grantSuperadmin } from './grantSuperadmin';
 
@@ -1566,6 +1567,106 @@ async function runChecks(): Promise<void> {
   });
   expectEqual('duplicate plate is still rejected', dupPlate.status, CONFLICT);
 
+  // I3: vehicles.schema.ts used to accept any-length hex, weaker than
+  // tapSchema's 6-32 char constraint (scan.schema.ts). A too-short UID
+  // accepted here would register a vehicle whose pass can never tap in —
+  // tapSchema would 422 it at the gate, silently, with nothing to explain
+  // why the pass "doesn't work".
+  const shortUidVehicle = await request(oss, 'POST', '/vehicles', {
+    owner_person_id: multiOwnerId,
+    plate_number: `RBAC-M3-${multiSuffix}`, // prefix: PROBE_VEHICLE_PLATE_PREFIXES (rejected — never persisted)
+    rfid_uid: 'A3F',
+    vehicle_type: 'car',
+    make: 'Kia',
+  });
+  expectEqual('a too-short rfid_uid is rejected at vehicle registration', shortUidVehicle.status, 422);
+
+  console.log('\n== C1: a vehicle with no valid_until fails closed (and still logs) ==');
+
+  // A legacy Vehicle row from before this branch's valid_until field existed
+  // (or one restored from an older backup, or edited directly in Mongo) has
+  // no valid_until even though the schema now says `required: true` — that
+  // is enforced only on write. scanService used to call .getTime() on it
+  // unconditionally, which threw a raw TypeError BEFORE scanRepo.createLog
+  // ran: the tap crashed unlogged, the barrier stayed shut, and nothing in
+  // Records explained why. This proves the fix: fail closed with
+  // vehicle_expired, AND still write the scan log — the log is the part that
+  // distinguishes this fix from the crash.
+  const c1Stamp = Date.now();
+  const c1Suffix = (c1Stamp % 0xffff).toString(16).toUpperCase().padStart(4, '0');
+  const c1OwnerRes = await request(superadmin, 'POST', '/persons', {
+    full_name: 'C1 Legacy Vehicle Owner',
+    type: 'student',
+    id_number: `verify-rbac-c1-${c1Stamp}`, // prefix: PROBE_PERSON_ID_PREFIXES
+    department_section: 'BSIT 4-A',
+    rfid_uid: 'CAFE' + c1Suffix,
+  });
+  expectEqual('C1 probe owner created', c1OwnerRes.status, CREATED);
+  const c1OwnerData = c1OwnerRes.json.data as { _id?: string; id?: string } | undefined;
+  const c1OwnerId = String(c1OwnerData?._id ?? c1OwnerData?.id ?? '');
+  expectEqual('C1 probe owner has an id', c1OwnerId.length > 0, true);
+
+  const c1VehicleRfid = 'C1FE' + c1Suffix;
+  const c1VehicleRes = await request(oss, 'POST', '/vehicles', {
+    owner_person_id: c1OwnerId,
+    plate_number: `RBAC-C1-${c1Suffix}`, // prefix: PROBE_VEHICLE_PLATE_PREFIXES
+    rfid_uid: c1VehicleRfid,
+    vehicle_type: 'car',
+    make: 'Toyota',
+  });
+  expectEqual('C1 probe vehicle created', c1VehicleRes.status, CREATED);
+  const c1VehicleData = c1VehicleRes.json.data as { _id?: string; id?: string } | undefined;
+  const c1VehicleId = String(c1VehicleData?._id ?? c1VehicleData?.id ?? '');
+  expectEqual('C1 probe vehicle has an id', c1VehicleId.length > 0, true);
+
+  // Strip valid_until directly against Mongo, bypassing the API entirely.
+  // updateOne (unlike a document .save()) does not run schema validators by
+  // default — that mismatch (enforced on write via the API, not enforced by
+  // Mongo itself) is exactly how a legacy or restored row ends up missing
+  // the field in the first place, so this reproduces that real condition
+  // rather than a synthetic one.
+  await VehicleModel.updateOne({ _id: c1VehicleId }, { $unset: { valid_until: 1 } });
+  const strippedVehicle = await VehicleModel.findById(c1VehicleId).lean();
+  expectEqual(
+    'C1 probe vehicle has no valid_until after the direct strip',
+    strippedVehicle?.valid_until,
+    undefined
+  );
+
+  const c1Gates = await request(superadmin, 'GET', '/gates');
+  const c1GateList = (c1Gates.json.data ?? []) as { _id?: string; id?: string; name: string }[];
+  const c1ParkingGate = c1GateList.find((g) => g.name === 'Parking Entrance');
+  const c1GateId = (c1ParkingGate?._id ?? c1ParkingGate?.id) as string;
+  expectEqual('a vehicle-entry gate exists for the C1 probe tap', Boolean(c1GateId), true);
+
+  const c1Tap = await request(superadmin, 'POST', '/scan/tap', {
+    rfid_uid: c1VehicleRfid,
+    gate_id: c1GateId,
+    direction: 'entry',
+  });
+  // The crash this guards against was a raw 500 (unhandled TypeError), not a
+  // clean denial — the status check matters as much as the body.
+  expectEqual('a vehicle with no valid_until does not 500', c1Tap.status, 200);
+  const c1TapData = c1Tap.json.data as { access_result?: string; reason?: string } | undefined;
+  expectEqual('a vehicle with no valid_until is denied', c1TapData?.access_result, 'denied');
+  expectEqual('the denial reason is vehicle_expired', c1TapData?.reason, 'vehicle_expired');
+
+  // The part that distinguishes this fix from a bare crash: the tap must be
+  // LOGGED, not just denied. Read straight from Mongo rather than over
+  // HTTP — GET /scan/logs has no rfid_uid filter — and require a fresh row
+  // so this cannot pass against some unrelated pre-existing log.
+  const c1LogRow = await ScanLogModel.findOne({ rfid_uid: c1VehicleRfid })
+    .sort({ scan_time: -1 })
+    .lean();
+  expectEqual('a scan log row was written for the crash-prone tap', Boolean(c1LogRow), true);
+  expectEqual('the logged access_result is denied', c1LogRow?.access_result, 'denied');
+  expectEqual('the logged reason is vehicle_expired', c1LogRow?.reason, 'vehicle_expired');
+  expectEqual(
+    'the logged row is fresh (from this run, not a coincidence)',
+    c1LogRow?.scan_time ? Date.now() - new Date(c1LogRow.scan_time).getTime() < 60_000 : false,
+    true
+  );
+
   console.log('\n== vehicle applications ==');
 
   const appStamp = Date.now();
@@ -1656,9 +1757,103 @@ async function runChecks(): Promise<void> {
   });
   expectEqual('a minimal application is accepted', minimal.status, CREATED);
 
-  // Duplicate plate and duplicate rfid are still rejected, distinctly.
-  const dupApp = await request(oss, 'POST', '/vehicle-applications', { ...fullApplication, plate_no: `RBAC-A1-${appSuffix}`, rfid_uid: 'FAB2' + appSuffix });
+  // I3: same weak-regex hole as vehicles.schema.ts, now reachable through the
+  // registration door too — a too-short UID accepted here would file the
+  // paperwork and issue a sticker for a pass that tapSchema then 422s at the
+  // gate, silently.
+  const shortUidApp = await request(oss, 'POST', '/vehicle-applications', {
+    ...fullApplication,
+    plate_no: `RBAC-A3-${appSuffix}`, // rejected — never persisted
+    rfid_uid: 'A3F',
+  });
+  expectEqual('a too-short rfid_uid is rejected at application registration', shortUidApp.status, 422);
+
+  // I2: duplicate plate and duplicate rfid must both be rejected before the
+  // application is ever written — not just before the vehicle is written.
+  // The old order (application, THEN vehicle, THEN the vehicle insert's own
+  // unique-index check) let the common typo case (a clerk mistypes a plate
+  // or RFID that's already registered) leave a permanent orphan application
+  // with vehicle_id: null, since applications can never be edited or
+  // deleted. Count before/after proves no new application row was written,
+  // not just that the response was a 409 — a 409 with a leaked write behind
+  // it would be the exact defect this fix closes.
+  const plateFilterQs = `plate_no=${encodeURIComponent(`RBAC-A1-${appSuffix}`)}&limit=100`;
+  const beforePlateDup = await request(superadmin, 'GET', `/vehicle-applications?${plateFilterQs}`);
+  const beforePlateDupTotal = (
+    (beforePlateDup.json.meta ?? {}) as { pagination?: { total?: number } }
+  ).pagination?.total;
+  expectEqual('application count readable before duplicate-plate attempt', typeof beforePlateDupTotal, 'number');
+
+  const dupApp = await request(oss, 'POST', '/vehicle-applications', {
+    ...fullApplication,
+    plate_no: `RBAC-A1-${appSuffix}`,
+    rfid_uid: 'FAB2' + appSuffix,
+  });
   expectEqual('duplicate plate rejected', dupApp.status, 409);
+
+  const afterPlateDup = await request(superadmin, 'GET', `/vehicle-applications?${plateFilterQs}`);
+  const afterPlateDupTotal = (
+    (afterPlateDup.json.meta ?? {}) as { pagination?: { total?: number } }
+  ).pagination?.total;
+  expectEqual(
+    'duplicate-plate submission created no new application (count unchanged)',
+    afterPlateDupTotal,
+    beforePlateDupTotal
+  );
+
+  const ownerFilterQs = `owner_person_id=${applicantId}&limit=100`;
+  const beforeRfidDup = await request(superadmin, 'GET', `/vehicle-applications?${ownerFilterQs}`);
+  const beforeRfidDupTotal = (
+    (beforeRfidDup.json.meta ?? {}) as { pagination?: { total?: number } }
+  ).pagination?.total;
+  expectEqual('application count readable before duplicate-rfid attempt', typeof beforeRfidDupTotal, 'number');
+
+  const dupRfidApp = await request(oss, 'POST', '/vehicle-applications', {
+    ...fullApplication,
+    plate_no: `RBAC-A4-${appSuffix}`,
+    rfid_uid: fullApplication.rfid_uid, // duplicate of the first application's UID
+  });
+  expectEqual('duplicate rfid_uid rejected', dupRfidApp.status, 409);
+
+  const afterRfidDup = await request(superadmin, 'GET', `/vehicle-applications?${ownerFilterQs}`);
+  const afterRfidDupTotal = (
+    (afterRfidDup.json.meta ?? {}) as { pagination?: { total?: number } }
+  ).pagination?.total;
+  expectEqual(
+    'duplicate-rfid submission created no new application (count unchanged)',
+    afterRfidDupTotal,
+    beforeRfidDupTotal
+  );
+
+  // I2 (unlinked filter): every application created above is linked to a
+  // vehicle (create() only returns 201 once both writes succeed), so
+  // linked=false must find none of THIS run's rows even though several exist
+  // for this owner — proving the filter actually discriminates rather than
+  // just returning everything.
+  const unlinkedForOwner = await request(
+    superadmin,
+    'GET',
+    `/vehicle-applications?owner_person_id=${applicantId}&linked=false&limit=100`
+  );
+  expectEqual('unlinked filter responds 200', unlinkedForOwner.status, OK);
+  const unlinkedRows = (unlinkedForOwner.json.data ?? []) as { vehicle_id?: string | null }[];
+  expectEqual(
+    'linked=false finds none of this run\'s (fully-linked) applications',
+    unlinkedRows.length,
+    0
+  );
+  const linkedForOwner = await request(
+    superadmin,
+    'GET',
+    `/vehicle-applications?owner_person_id=${applicantId}&linked=true&limit=100`
+  );
+  const linkedRows = (linkedForOwner.json.data ?? []) as { vehicle_id?: string | null }[];
+  expectEqual('linked=true finds this run\'s applications', linkedRows.length > 0, true);
+  expectEqual(
+    'every linked=true row actually carries a vehicle_id',
+    linkedRows.every((r) => !!r.vehicle_id),
+    true
+  );
 
   console.log('\n== application signatures are frozen per application ==');
 
