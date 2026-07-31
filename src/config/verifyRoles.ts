@@ -1374,6 +1374,22 @@ async function runChecks(): Promise<void> {
     registrar, 'PATCH', `/persons/${probeStudent!._id}`, OK, { department_section: 'BSIT 4-B' }
   );
 
+  // id_number is also the linked User's login username, so it is read-only
+  // on PATCH /persons/:id — the frontend just disables the input, but that
+  // is a usability layer, not the enforcement boundary. A status-only check
+  // would pass even if the field were silently stripped (200 either way),
+  // so assert the STORED value afterwards instead.
+  await check(
+    'PATCH accepts a body containing id_number (field is silently dropped, not rejected)',
+    registrar, 'PATCH', `/persons/${probeStudent!._id}`, OK, { id_number: `${probeStudentId}-CHANGED` }
+  );
+  const afterIdNumberAttempt = await request(superadmin, 'GET', `/persons/${probeStudent!._id}`);
+  expectEqual(
+    'id_number is unchanged after a PATCH that tried to set it',
+    (afterIdNumberAttempt.json.data as { id_number?: string } | undefined)?.id_number,
+    probeStudentId
+  );
+
   // Status is a write, so it is domain-scoped too.
   await check(
     'hr may deactivate a staff person',
