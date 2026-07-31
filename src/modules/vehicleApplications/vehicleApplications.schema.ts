@@ -43,8 +43,13 @@ export const createApplicationSchema = z.object({
   signed_name: z.string().min(1),
   signed_date: z.string().min(1),
 
-  // Matches tapSchema's existing constraint and what real readers emit.
-  rfid_uid: z.string().regex(/^[0-9A-Fa-f]+$/, 'rfid_uid must be hex'),
+  // Matches tapSchema's existing constraint (scan.schema.ts): 6-32 hex
+  // characters, what real readers emit. A UID accepted here but rejected by
+  // tapSchema at the gate would issue a sticker for a pass that can never
+  // tap in — the gate would 422 before scanService.tap ever runs.
+  rfid_uid: z
+    .string()
+    .regex(/^[0-9A-Fa-f]{6,32}$/, 'rfid_uid must be 6-32 hex characters'),
 
   valid_until: z.string().datetime().optional(),
 });
