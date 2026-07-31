@@ -50,12 +50,17 @@ export const vehicleService = {
   },
   async update(id: string, data: Partial<IVehicle>, actor: Actor) {
     assertCanWrite(actor, 'vehicle');
-    // Fail closed on the activating path only: a deleted person's vehicle
-    // cannot be brought back to 'active' by PATCH .../status or a plain
-    // update that sets status: 'active'. Deactivating, or editing an
-    // already-inactive vehicle, needs no owner check — nothing at the
-    // barrier is being re-armed.
-    if (data.status === 'active') {
+    // Fail closed whenever the barrier's arming state could change: either
+    // the vehicle is being activated, OR its owner is being reassigned.
+    // updateVehicleSchema is createVehicleSchema.partial(), so PATCH
+    // /vehicles/:id can patch owner_person_id on its own, with no status
+    // field at all — on an ALREADY-active vehicle that path used to skip
+    // this check entirely (status stays 'active', valid_until stays ahead),
+    // reaching the exact barrier the activating-path guard was meant to
+    // close, just through a different field. Deactivating, or editing an
+    // already-inactive vehicle with no owner change, needs no owner check —
+    // nothing at the barrier is being re-armed.
+    if (data.status === 'active' || data.owner_person_id) {
       const current = await vehicleRepo.findById(id);
       if (!current) throw new ApiError('NOT_FOUND', 'Vehicle not found');
       const ownerId = data.owner_person_id ?? current.owner_person_id;

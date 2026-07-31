@@ -67,9 +67,15 @@ export const userRepo = {
 
     if (Object.keys(personFilter).length === 0) return base;
 
-    const personIds = (await PersonModel.find(personFilter).select('_id').lean()).map(
-      (p) => p._id as Types.ObjectId
-    );
+    // deleted_at: null here, not just on the User side above: a type/section/
+    // search filter must not resolve through to a soft-deleted person's id,
+    // or a query as ordinary as `type: 'student'` becomes a way to reach a
+    // login the delete cascade deliberately killed. Without this, "Activate
+    // All Students" reactivates a deleted student's login the moment a
+    // registrar runs it against the whole roster.
+    const personIds = (
+      await PersonModel.find({ ...personFilter, deleted_at: null }).select('_id').lean()
+    ).map((p) => p._id as Types.ObjectId);
     return { ...base, person_id: { $in: personIds } };
   },
 

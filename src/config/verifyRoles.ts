@@ -31,6 +31,7 @@ import { ScanLogModel } from '../modules/scan/scan.model';
 import { ApplicationSignatureModel } from '../modules/vehicleApplications/applicationSignatures.model';
 import { BlockedCardModel } from '../modules/blockedCards/blockedCards.model';
 import { grantSuperadmin } from './grantSuperadmin';
+import { userService } from '../modules/users/users.service';
 
 // Installs the X-Verify-Bypass header on every fetch() this process makes,
 // once, before any request goes out — see verifyBypass.ts. The server's rate
@@ -1664,6 +1665,91 @@ async function runChecks(): Promise<void> {
   });
   expectEqual('creating a vehicle for a deleted owner is refused', i4NewVehicle.status, 404);
 
+  console.log('\n== I4b (fix wave 2): owner reassignment cannot re-admit a deleted person\'s car ==');
+
+  // updateVehicleSchema is createVehicleSchema.partial(), so owner_person_id
+  // is patchable on its own with no status field at all. Before this fix,
+  // vehicles.service only ran the owner check when data.status === 'active'
+  // — an ALREADY-active vehicle's owner could be reassigned to a deleted
+  // person and the guard never fired: status stayed 'active', valid_until
+  // stayed ahead, and scan.service.tap would have granted it and shown
+  // "Unknown owner" at the terminal. A second fresh owner + a second fresh
+  // active vehicle proves this on the reassignment path specifically, not
+  // the already-covered activation path.
+  const i4bOwnerRes = await request(superadmin, 'POST', '/persons', {
+    full_name: 'I4b Reassignment Target Owner',
+    type: 'student',
+    id_number: `verify-rbac-i4b-${i4Stamp}`, // prefix: PROBE_PERSON_ID_PREFIXES
+    department_section: 'BSIT 4-A',
+    rfid_uid: 'FEE1' + i4Suffix,
+  });
+  expectEqual('I4b probe second owner created', i4bOwnerRes.status, CREATED);
+  const i4bOwnerData = i4bOwnerRes.json.data as { _id?: string; id?: string } | undefined;
+  const i4bOwnerId = String(i4bOwnerData?._id ?? i4bOwnerData?.id ?? '');
+  expectEqual('I4b probe second owner has an id', i4bOwnerId.length > 0, true);
+
+  const i4bVehicleRes = await request(oss, 'POST', '/vehicles', {
+    owner_person_id: i4bOwnerId,
+    plate_number: `RBAC-I4C-${i4Suffix}`, // prefix: PROBE_VEHICLE_PLATE_PREFIXES
+    rfid_uid: 'FEE2' + i4Suffix,
+    vehicle_type: 'car',
+    make: 'Mazda',
+  });
+  expectEqual('I4b probe vehicle created, active, owned by the second owner', i4bVehicleRes.status, CREATED);
+  const i4bVehicleData = i4bVehicleRes.json.data as { _id?: string; id?: string; status?: string } | undefined;
+  const i4bVehicleId = String(i4bVehicleData?._id ?? i4bVehicleData?.id ?? '');
+  expectEqual('I4b probe vehicle has an id', i4bVehicleId.length > 0, true);
+  expectEqual('I4b probe vehicle starts active', i4bVehicleData?.status, 'active');
+
+  // Reassign the ALREADY-active vehicle's owner to i4OwnerId — the owner
+  // deleted earlier in the I4 block above — with no `status` field in the
+  // patch at all. This is precisely the unguarded path.
+  const i4bReassign = await request(superadmin, 'PATCH', `/vehicles/${i4bVehicleId}`, {
+    owner_person_id: i4OwnerId,
+  });
+  expectEqual(
+    'reassigning an active vehicle\'s owner to a deleted person is refused',
+    i4bReassign.status,
+    404
+  );
+
+  // Refused means refused: neither the owner nor the active status may have
+  // moved. Checking status alone would miss a bug where the write partially
+  // applied (owner reassigned, status merely left alone by chance).
+  const i4bAfter = await request(superadmin, 'GET', '/vehicles?limit=100');
+  const i4bRow = ((i4bAfter.json.data ?? []) as { _id: string; status: string; owner_person_id?: string }[])
+    .find((v) => v._id === i4bVehicleId);
+  expectEqual('the refused reassignment left the vehicle active', i4bRow?.status, 'active');
+  expectEqual(
+    'the refused reassignment left the original owner in place',
+    i4bRow?.owner_person_id,
+    i4bOwnerId
+  );
+
+  // The other half of the ruling: deactivating a vehicle whose owner is
+  // already gone must still work — this guard must not regress that. Use the
+  // I4 vehicle from above, which the earlier owner-delete cascade already
+  // left 'inactive' with a deleted owner; flip it active directly in Mongo
+  // (bypassing the API) to reproduce the exact state a pre-existing/legacy
+  // row could be in, then confirm PATCH status: 'inactive' (no owner_person_id
+  // in the patch) still succeeds even though personRepo.findById(i4OwnerId)
+  // resolves to null.
+  await VehicleModel.updateOne({ _id: i4VehicleId }, { $set: { status: 'active' } });
+  const i4Deactivate = await request(superadmin, 'PATCH', `/vehicles/${i4VehicleId}`, {
+    status: 'inactive',
+  });
+  expectEqual(
+    'deactivating a vehicle whose owner is deleted still works',
+    i4Deactivate.status,
+    OK
+  );
+  const i4DeactivateRow = await VehicleModel.findById(i4VehicleId).lean();
+  expectEqual(
+    'the deactivation actually persisted',
+    (i4DeactivateRow as unknown as { status?: string } | null)?.status,
+    'inactive'
+  );
+
   console.log('\n== C1: a vehicle with no valid_until fails closed (and still logs) ==');
 
   // A legacy Vehicle row from before this branch's valid_until field existed
@@ -2297,6 +2383,60 @@ async function runChecks(): Promise<void> {
   });
   expectEqual('the refused reactivation attempts left the login unusable',
     vicLoginStillOut.status, 401);
+
+  console.log('\n== I2b (fix wave 2): the BULK path cannot resurrect a deleted person\'s login ==');
+
+  // The single-account path (just above) was already fixed. buildFilter's
+  // person lookup and resolveBulkTargets' own person lookup both used to
+  // resolve people with no deleted_at predicate at all, so a *bulk* activate
+  // could still reach this exact still-deleted victim — a hole the
+  // single-account fix does nothing to close. Two lookups, two assertions.
+
+  // (a) buildFilter: a personFilter query (search/type/department_section)
+  // naming this deleted victim specifically must resolve to zero users, not
+  // find them and hand them to resolveBulkTargets. `search` is unique to this
+  // probe's id_number, so this cannot accidentally match a real person.
+  const bulkSearchMatch = await request(superadmin, 'POST', '/users/bulk-status', {
+    active: true,
+    filter: { search: `verify-rbac-vic-${vicStamp}` },
+  });
+  const bulkSearchMatchData = (bulkSearchMatch.json.data ?? {}) as { matched?: number; modified?: number };
+  expectEqual('bulk activate by search naming the deleted victim responds 200', bulkSearchMatch.status, OK);
+  expectEqual(
+    'a search filter naming a deleted person matches zero candidates (buildFilter excludes them)',
+    bulkSearchMatchData.matched,
+    0
+  );
+
+  // (b) resolveBulkTargets: an EMPTY filter (`filter: {}`) skips buildFilter's
+  // person query entirely (see buildFilter's early return) and candidates
+  // come from the User collection alone — resolveBulkTargets' own person
+  // lookup is the only remaining gate for that path, which is exactly the
+  // "even filter: {} reaches them" case. Called directly (not over HTTP) so
+  // this assertion has zero blast radius: it inspects the target *list*
+  // resolveBulkTargets would produce for a real registrar, rather than
+  // actually running the mutation against every student account.
+  const registrarUserDoc = await UserModel.findOne({ username: 'testregistrar' }).lean();
+  const registrarActorId = String((registrarUserDoc as unknown as { _id?: unknown } | null)?._id ?? '');
+  expectEqual('registrar user id resolved for the direct resolveBulkTargets check', registrarActorId.length > 0, true);
+
+  const directTargets = await userService.resolveBulkTargets({}, { id: registrarActorId, role: 'registrar' });
+  expectEqual(
+    'resolveBulkTargets with an empty filter excludes a soft-deleted person\'s login',
+    directTargets.targets.includes(vicLoginId),
+    false
+  );
+
+  // Assert the STORED value, not just response counts — a count-only check
+  // (e.g. "modified: 0") would pass even against the broken build if the
+  // write happened to be a no-op for some unrelated reason. Read straight
+  // from Mongo.
+  const vicLoginRowAfterBulk = await UserModel.findById(vicLoginId).lean();
+  expectEqual(
+    'the deleted victim\'s login is still is_active: false after both bulk attempts',
+    (vicLoginRowAfterBulk as unknown as { is_active?: boolean } | null)?.is_active,
+    false
+  );
 
   // Restore returns the record, not access.
   await check('registrar cannot restore', registrar, 'POST', `/persons/${victimId}/restore`, FORBIDDEN);

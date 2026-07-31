@@ -239,10 +239,18 @@ export const userService = {
     const personIds = candidates
       .map((c) => c.person_id)
       .filter((p): p is NonNullable<typeof p> => Boolean(p));
+    // Selects deleted_at too (not filtered out of the query) so a soft-deleted
+    // person is still found here — it must be, or it becomes indistinguishable
+    // from a genuinely dangling person_id below and falls through the "rank
+    // alone governs" branch that dangling refs are deliberately allowed to
+    // take. This is what buildFilter's own person lookup cannot do on its
+    // own: buildFilter is skipped entirely for an empty filter (`filter: {}`),
+    // so an unfiltered bulk action reaches every candidate ONLY through this
+    // query, and the exclusion below is the last gate before targets.push.
     const persons = personIds.length
-      ? await PersonModel.find({ _id: { $in: personIds } }).select('_id type').lean()
+      ? await PersonModel.find({ _id: { $in: personIds } }).select('_id type deleted_at').lean()
       : [];
-    const typeById = new Map(persons.map((p) => [String(p._id), p.type]));
+    const infoById = new Map(persons.map((p) => [String(p._id), p]));
 
     const targets: string[] = [];
     let excluded = 0;
@@ -252,10 +260,19 @@ export const userService = {
         continue;
       }
       if (c.person_id) {
-        const type = typeById.get(String(c.person_id));
-        // A dangling person_id has no gate side, so rank alone governs it —
-        // matching assertCanActOnPersonBackedAccount above.
-        if (type && !writable.includes(personDomain(type as 'student' | 'staff' | 'employee'))) {
+        const info = infoById.get(String(c.person_id));
+        // A soft-deleted person's login is never a bulk candidate, regardless
+        // of domain: personService.softDelete deliberately killed this exact
+        // login, and only a superadmin may revive it, one at a time, via
+        // PATCH /users/:id/status (assertCanActOnPersonBackedAccount above).
+        // A dangling person_id (no Person document at all — `info` is
+        // undefined) is a different case with no gate side, so rank alone
+        // still governs it; do not conflate the two.
+        if (info?.deleted_at) {
+          excluded++;
+          continue;
+        }
+        if (info && !writable.includes(personDomain(info.type as 'student' | 'staff' | 'employee'))) {
           excluded++;
           continue;
         }
