@@ -73,12 +73,17 @@ export const scanService = {
       if (vehicle) {
         entity_type = 'vehicle';
         entity_id = vehicle._id;
-        if (vehicle.status === 'active') {
-          access_result = 'granted';
-          reason = null;
-        } else {
+        if (vehicle.status !== 'active') {
           access_result = 'denied';
           reason = 'inactive_id';
+        } else if (vehicle.valid_until.getTime() < scan_time.getTime()) {
+          // Expiry is stored as end-of-day local (see nextSchoolYearEnd), so a
+          // pass valid until 2027-03-31 works for all of that day.
+          access_result = 'denied';
+          reason = 'vehicle_expired';
+        } else {
+          access_result = 'granted';
+          reason = null;
         }
         const owner = await personRepo.findById(String(vehicle.owner_person_id));
         personView = {

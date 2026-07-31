@@ -529,6 +529,79 @@ async function main(): Promise<void> {
     'granted'
   );
 
+  console.log('\n== an expired pass is denied ==');
+
+  // The seeded vehicle used elsewhere in this harness (Juan's motorcycle,
+  // plate NCST-1234).
+  const expiredUid = 'E5F6A7B8';
+
+  // Find it over HTTP, and read its current expiry so the restore is exact
+  // rather than assumed.
+  const vehicleListForExpiry = await request(superadmin, 'GET', '/vehicles?limit=100');
+  const vehiclesForExpiry = (vehicleListForExpiry.json.data ?? []) as {
+    _id: string;
+    rfid_uid: string;
+    valid_until: string;
+  }[];
+  expectEqual('vehicle list is non-empty', vehiclesForExpiry.length > 0, true);
+  const expiredTarget = vehiclesForExpiry.find((v) => v.rfid_uid === expiredUid);
+  expectEqual(`seeded vehicle ${expiredUid} is present`, Boolean(expiredTarget), true);
+  const originalValidUntil = expiredTarget!.valid_until;
+
+  const backdated = new Date(Date.now() - 86_400_000).toISOString();
+  const patched = await request(superadmin, 'PATCH', `/vehicles/${expiredTarget!._id}`, {
+    valid_until: backdated,
+  });
+  expectEqual('expiry was backdated', patched.status, 200);
+
+  const expiredTap = await tap(gateKey(parkingKey), { rfid_uid: expiredUid });
+  expectEqual(
+    'an expired pass is denied',
+    (expiredTap.json.data as { access_result?: string } | undefined)?.access_result,
+    'denied'
+  );
+  expectEqual(
+    'the denial reason is vehicle_expired',
+    (expiredTap.json.data as { reason?: string } | undefined)?.reason,
+    'vehicle_expired'
+  );
+
+  // A denied tap must never move occupancy. Read the roster and confirm this
+  // vehicle is not on it. The occupancy projection does not expose entity_id
+  // (see occupancy.repository.ts listInside) — for a vehicle it projects the
+  // plate_number as `name`, so match on that instead.
+  const roster = await request(superadmin, 'GET', '/occupancy?limit=100');
+  const inside = (roster.json.data ?? []) as { entity_type?: string; name?: string }[];
+  expectEqual(
+    'an expired tap did not put the vehicle inside',
+    inside.some((r) => r.entity_type === 'vehicle' && r.name === 'NCST-1234'),
+    false
+  );
+
+  // Restore, and prove the pass works again — which also proves the denial
+  // came from expiry rather than from some unrelated state.
+  const restoredPatch = await request(superadmin, 'PATCH', `/vehicles/${expiredTarget!._id}`, {
+    valid_until: originalValidUntil,
+  });
+  expectEqual('expiry restored', restoredPatch.status, 200);
+  const restoredTap = await tap(gateKey(parkingKey), { rfid_uid: expiredUid });
+  expectEqual(
+    'the pass works again once restored',
+    (restoredTap.json.data as { access_result?: string } | undefined)?.access_result,
+    'granted'
+  );
+
+  // The restored tap left the vehicle occupancy-'inside'. Release it here so
+  // the next run starts clean, or the next run's earlier "granted vehicle tap
+  // grants" check would fail with a stale already_inside.
+  if (!parkingOutKey) throw new Error('parking exit key minting did not return a key');
+  const expiryCleanupExit = await tap(gateKey(parkingOutKey), { rfid_uid: expiredUid });
+  expectEqual(
+    'post-restore vehicle exit releases occupancy',
+    (expiryCleanupExit.json.data as { access_result?: string } | undefined)?.access_result,
+    'granted'
+  );
+
   // An exit gate must close the attendance day the entry gate opened.
   const sideGate = gates.find((g) => g.name === 'Side Gate');
   if (!sideGate) throw new Error('Side Gate missing — run npm run seed:test');
