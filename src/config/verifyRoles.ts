@@ -2107,20 +2107,126 @@ async function runChecks(): Promise<void> {
   const insideNames = ((rosterAfterBlocked.json.data ?? []) as { name?: string }[]);
   expectEqual('a blocked tap put nobody inside',
     insideNames.some((r) => r.name === 'Card Holder Probe'), false);
+
+  console.log('\n== delete cascades, restore does not re-admit ==');
+
+  // Build a person with a login AND a vehicle, so the cascade has all three targets.
+  const vicStamp = Date.now();
+  const vicSuffix = (vicStamp % 0xffff).toString(16).toUpperCase().padStart(4, '0');
+  const victimUid = 'DEAD' + vicSuffix;
+  const victimUsername = `verify-del-${vicStamp}`;        // prefix: PROBE_USER_USERNAME_PREFIXES
+
+  const vicRes = await request(superadmin, 'POST', '/persons', {
+    full_name: 'Cascade Victim Probe',
+    type: 'student',
+    id_number: `verify-rbac-vic-${vicStamp}`,             // prefix: PROBE_PERSON_ID_PREFIXES
+    department_section: 'BSIT 4-A',
+    rfid_uid: victimUid,
+  });
+  expectEqual('cascade victim created', vicRes.status, CREATED);
+  const vicData = vicRes.json.data as { _id?: string; id?: string } | undefined;
+  const victimId = String(vicData?._id ?? vicData?.id ?? '');
+  expectEqual('cascade victim has an id', victimId.length > 0, true);
+
+  const vicLogin = await request(superadmin, 'POST', '/users', {
+    username: victimUsername, password: 'Verify@12345', role: 'student', person_id: victimId,
+  });
+  expectEqual('cascade victim login created', vicLogin.status, CREATED);
+
+  const victimVehicleUid = 'FACE' + vicSuffix;
+  const vicVeh = await request(oss, 'POST', '/vehicles', {
+    owner_person_id: victimId,
+    plate_number: `RBAC-VIC-${vicSuffix}`,                // prefix: PROBE_VEHICLE_PLATE_PREFIXES
+    rfid_uid: victimVehicleUid,
+    vehicle_type: 'car',
+    make: 'Toyota',
+  });
+  expectEqual('cascade victim vehicle created', vicVeh.status, CREATED);
+  const vicVehData = vicVeh.json.data as { _id?: string; id?: string } | undefined;
+  const victimVehicleId = String(vicVehData?._id ?? vicVehData?.id ?? '');
+  expectEqual('cascade victim vehicle has an id', victimVehicleId.length > 0, true);
+
+  await check('registrar cannot delete a person', registrar, 'DELETE', `/persons/${victimId}`, FORBIDDEN);
+  await check('hr cannot delete a person', hr, 'DELETE', `/persons/${victimId}`, FORBIDDEN);
+  await check('superadmin deletes the person', superadmin, 'DELETE', `/persons/${victimId}`, OK);
+
+  // The cascade reached all three.
+  const gone = await request(superadmin, 'GET', `/persons/${victimId}`);
+  expectEqual('the person is gone', gone.status, 404);
+
+  const vehAfter = await request(superadmin, 'GET', `/vehicles?limit=100`);
+  const theirVehicle = ((vehAfter.json.data ?? []) as { _id: string; status: string }[])
+    .find((v) => v._id === victimVehicleId);
+  expectEqual('their vehicle still exists', Boolean(theirVehicle), true);
+  expectEqual('their vehicle is deactivated', theirVehicle?.status, 'inactive');
+
+  const loginAfter = await fetch(`${BASE}/auth/login`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: victimUsername, password: 'Verify@12345' }),
+  });
+  expectEqual('their login no longer authenticates', loginAfter.status, 401);
+
+  // Their card is blocked, not merely unregistered. Same superadmin-token tap
+  // convention every other tap in this file uses. personGateId was already
+  // resolved above, in the soft-deleted-people block.
+  const victimTap = await request(superadmin, 'POST', '/scan/tap', {
+    rfid_uid: victimUid, gate_id: personGateId, direction: 'entry',
+  });
+  expectEqual('their card is blocked', (victimTap.json.data as { reason?: string })?.reason, 'card_blocked');
+
+  // Their VEHICLE's tag is refused too — proving the cascade reached it.
+  // Resolve a vehicle gate the same way: GET /gates, find 'Parking Entrance'.
+  const cascadeGatesRes = await request(superadmin, 'GET', '/gates');
+  const cascadeGateList = (cascadeGatesRes.json.data ?? []) as { _id?: string; id?: string; name: string }[];
+  const cascadeParkingGate = cascadeGateList.find((g) => g.name === 'Parking Entrance');
+  const vehicleGateId = (cascadeParkingGate?._id ?? cascadeParkingGate?.id) as string;
+  expectEqual('a vehicle gate exists for the cascade tap', Boolean(vehicleGateId), true);
+
+  const vehTapAfter = await request(superadmin, 'POST', '/scan/tap', {
+    rfid_uid: victimVehicleUid, gate_id: vehicleGateId, direction: 'entry',
+  });
+  expectEqual('their vehicle is refused at the barrier',
+    (vehTapAfter.json.data as { access_result?: string })?.access_result, 'denied');
+
+  // Restore returns the record, not access.
+  await check('registrar cannot restore', registrar, 'POST', `/persons/${victimId}/restore`, FORBIDDEN);
+  await check('superadmin restores', superadmin, 'POST', `/persons/${victimId}/restore`, OK);
+  const victimRestored = await request(superadmin, 'GET', `/persons/${victimId}`);
+  expectEqual('the person is back', victimRestored.status, OK);
+  expectEqual('restored inactive, not active',
+    (victimRestored.json.data as { status?: string })?.status, 'inactive');
+  expectEqual('restored with no card',
+    (victimRestored.json.data as { rfid_uid?: string })?.rfid_uid ?? null, null);
+
+  const vehStill = await request(superadmin, 'GET', '/vehicles?limit=100');
+  expectEqual('restore did NOT reactivate their vehicle',
+    ((vehStill.json.data ?? []) as { _id: string; status: string }[])
+      .find((v) => v._id === victimVehicleId)?.status, 'inactive');
+
+  // Their old card is still blocked after restore — restore is not an undo
+  // for the card, only for the record.
+  const victimTapAfterRestore = await request(superadmin, 'POST', '/scan/tap', {
+    rfid_uid: victimUid, gate_id: personGateId, direction: 'entry',
+  });
+  expectEqual('their card is still blocked after restore',
+    (victimTapAfterRestore.json.data as { reason?: string })?.reason, 'card_blocked');
 }
 
 /**
  * Prefixes this harness uses for the probe Person/User/Vehicle records it
- * creates. There is deliberately no `DELETE /persons/:id` or
- * `DELETE /vehicles/:id` route (see the module comments above the "person
- * write domains" and "vehicle write domain" sections), so cleanup has to go
- * straight at the database — the same pattern rebuildOccupancy.ts uses for
- * config-script DB access. Every prefix here was found by grepping this file
- * for the literal strings passed as `id_number`/`username`/`plate_number`,
- * not guessed:
- *   - Person.id_number: 'verify-rbac-' (student/staff/vehicle-owner probes),
- *     'verify-del-' (the deletion-test throwaway, left 'inactive' rather
- *     than removed by DELETE /users/:id).
+ * creates. `DELETE /persons/:id` exists now (Task 3) but only soft-deletes —
+ * the row survives with deleted_at set, exactly like `DELETE /users/:id` —
+ * and there is still no `DELETE /vehicles/:id` at all (see the module
+ * comments above the "person write domains" and "vehicle write domain"
+ * sections), so cleanup still has to go straight at the database to actually
+ * remove rows — the same pattern rebuildOccupancy.ts uses for config-script
+ * DB access. Every prefix here was found by grepping this file for the
+ * literal strings passed as `id_number`/`username`/`plate_number`, not
+ * guessed:
+ *   - Person.id_number: 'verify-rbac-' (student/staff/vehicle-owner probes,
+ *     including the cascade-delete/restore victim), 'verify-del-' (the
+ *     deletion-test throwaway, left 'inactive' rather than removed by
+ *     DELETE /users/:id).
  *   - User.username: 'verify-stu-' and 'verify-reg2-' (created and never
  *     touched again), 'verify-del-' (soft-deleted by DELETE /users/:id,
  *     which sets deleted_at but does not remove the document).
@@ -2168,9 +2274,12 @@ const PROBE_USER_USERNAME_PREFIXES = [
 const PROBE_VEHICLE_PLATE_PREFIXES = ['RBAC-'];
 // BlockedCard.rfid_uid: 'BEEF' (the outgoing UID retired by the blocked-cards
 // block's PATCH /persons/:id/rfid — see the '== blocked cards ==' section
-// above). The replacement UID ('CAFE'-prefixed) is never blocked during this
-// harness, so it needs no prefix of its own here.
-const PROBE_BLOCKED_CARD_PREFIXES = ['BEEF'];
+// above), 'DEAD' (the cascade victim's person UID, blocked by softDelete —
+// see the '== delete cascades, restore does not re-admit ==' section below).
+// The replacement UID ('CAFE'-prefixed) and the vehicle UID ('FACE'-prefixed,
+// never blocked — only deactivated) are never blocked during this harness,
+// so they need no prefix of their own here.
+const PROBE_BLOCKED_CARD_PREFIXES = ['BEEF', 'DEAD'];
 
 /**
  * Removes every Person/User/Vehicle/VehicleApplication row this harness has

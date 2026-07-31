@@ -50,6 +50,12 @@ export const personController = {
   reassignRfid: asyncHandler(async (req: Request, res: Response) => {
     sendSuccess(res, await personService.reassignRfid(req.params.id, req.body.rfid_uid, actorOf(req)));
   }),
+  remove: asyncHandler(async (req: Request, res: Response) => {
+    sendSuccess(res, await personService.softDelete(req.params.id, actorOf(req)));
+  }),
+  restore: asyncHandler(async (req: Request, res: Response) => {
+    sendSuccess(res, await personService.restore(req.params.id));
+  }),
   uploadPhoto: asyncHandler(async (req: Request, res: Response) => {
     sendSuccess(res, await personPhotoService.upload(req.params.id, actorOf(req), req.file), 201);
   }),

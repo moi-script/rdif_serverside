@@ -68,3 +68,10 @@ personRoutes.patch(
   validate(statusSchema),
   personController.setStatus
 );
+
+// Delete and restore are superadmin-only, matching DELETE /users/:id: the
+// cascade closes a physical gate (vehicles deactivated, card blocked, login
+// killed), which is a bigger blast radius than the domain-scoped writes
+// above and is not something registrar/hr/oss authority should reach.
+personRoutes.delete('/:id', authorize(ROLES.SUPERADMIN), personController.remove);
+personRoutes.post('/:id/restore', authorize(ROLES.SUPERADMIN), personController.restore);

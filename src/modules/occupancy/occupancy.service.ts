@@ -66,7 +66,15 @@ async function resolveRfid(
   entity_id: Types.ObjectId
 ): Promise<string> {
   if (entity_type === 'person') {
-    const person = await PersonModel.findById(entity_id).select('rfid_uid').lean();
+    // deleted_at excluded for consistency with every other Person read in
+    // this codebase — though it changes nothing observable here: softDelete
+    // already $unsets rfid_uid, so a deleted person's document has no UID to
+    // return whether or not this filter is applied; both paths fall back to
+    // 'MANUAL'. Kept anyway so this lookup doesn't silently rely on that
+    // coincidence if softDelete's clearing logic ever changes.
+    const person = await PersonModel.findOne({ _id: entity_id, deleted_at: null })
+      .select('rfid_uid')
+      .lean();
     return person?.rfid_uid ?? 'MANUAL';
   }
   const vehicle = await VehicleModel.findById(entity_id).select('rfid_uid').lean();

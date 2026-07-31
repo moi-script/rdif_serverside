@@ -1,12 +1,13 @@
-import { FilterQuery } from 'mongoose';
+import { FilterQuery, Types } from 'mongoose';
 import { personRepo } from './persons.repository';
-import { IPerson } from './persons.model';
+import { IPerson, PersonModel } from './persons.model';
 import { ApiError } from '../../utils/ApiError';
 import { getPagination, buildMeta } from '../../utils/pagination';
 import { ROLES, personDomain } from '../../constants/roles';
 import { Actor, assertCanWrite, assertCanActOn } from '../../utils/authority';
 import { userRepo } from '../users/users.repository';
 import { blockedCardRepo } from '../blockedCards/blockedCards.repository';
+import { VehicleModel } from '../vehicles/vehicles.model';
 
 interface ListQuery {
   page?: string;
@@ -198,6 +199,71 @@ export const personService = {
         blocked_by: actor.id,
       });
     }
+    return updated;
+  },
+
+  /**
+   * Write order is load-bearing. There are no transactions (a standalone Mongo
+   * has no replica set), so a partial failure is possible and the order decides
+   * which side it lands on:
+   *   1. vehicles  — crash here: their car is refused, they are still admitted
+   *   2. person    — crash here: both cards refused
+   *   3. login     — last, because it grants no physical access
+   *
+   * Every partial failure leaves access MORE restricted, never less. Same rule
+   * users.service states for deactivation: the gate is the first thing closed.
+   */
+  async softDelete(id: string, actor: Actor) {
+    const person = await personRepo.findById(id);
+    if (!person) throw new ApiError('NOT_FOUND', 'Person not found');
+
+    await VehicleModel.updateMany({ owner_person_id: person._id }, { $set: { status: 'inactive' } });
+
+    const retiredUid = person.rfid_uid;
+    // Raw $set/$unset, not personRepo.updateById: Mongoose's update-casting
+    // silently DROPS a key whose value is `undefined` rather than unsetting
+    // it (verified against this repo's mongoose version), so `{ rfid_uid:
+    // undefined }` would leave the old UID in place — releasing nothing and
+    // leaving a deleted person still holding the sparse-unique claim.
+    // `$unset` is the only way to actually clear it.
+    await PersonModel.findByIdAndUpdate(id, {
+      $set: { deleted_at: new Date(), status: 'inactive' },
+      $unset: { rfid_uid: 1 }, // release the sparse-unique claim
+    });
+    if (retiredUid) {
+      await blockedCardRepo.block({
+        rfid_uid: retiredUid,
+        source: 'person_deleted',
+        previous_person_id: person._id,
+        blocked_by: actor.id,
+      });
+    }
+
+    const login = await userRepo.findByPersonId(id);
+    if (login) {
+      await userRepo.updateById(String(login._id), {
+        is_active: false,
+        refreshTokenHash: null, // an existing session must not be refreshable
+        deactivated_at: new Date(),
+        deactivated_by: new Types.ObjectId(actor.id),
+      });
+    }
+    return { id, deleted: true };
+  },
+
+  /**
+   * Restore returns the record, not access. It clears deleted_at and puts the
+   * person back at 'inactive' — never 'active' — and deliberately does NOT
+   * touch vehicles, the login, or the blocked card: a restored person has no
+   * card and must be issued a new one. Restore is not an undo for the card,
+   * only for the record.
+   */
+  async restore(id: string) {
+    const person = await PersonModel.findById(id).lean();
+    if (!person || !person.deleted_at) throw new ApiError('NOT_FOUND', 'Person not found');
+
+    const updated = await personRepo.updateById(id, { deleted_at: null, status: 'inactive' });
+    if (!updated) throw new ApiError('NOT_FOUND', 'Person not found');
     return updated;
   },
 };

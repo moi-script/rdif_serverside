@@ -112,9 +112,12 @@ export const dashboardService = {
    */
   async registrarView() {
     const [total_persons, by_type, recent] = await Promise.all([
-      PersonModel.countDocuments({}),
-      PersonModel.aggregate([{ $group: { _id: '$type', count: { $sum: 1 } } }]),
-      PersonModel.find()
+      PersonModel.countDocuments({ deleted_at: null }),
+      PersonModel.aggregate([
+        { $match: { deleted_at: null } },
+        { $group: { _id: '$type', count: { $sum: 1 } } },
+      ]),
+      PersonModel.find({ deleted_at: null })
         .sort({ createdAt: -1 })
         .limit(8)
         .select('full_name type department_section id_number createdAt')
@@ -153,8 +156,11 @@ export const dashboardService = {
       recent_scans,
       parking_activity,
     ] = await Promise.all([
-      PersonModel.countDocuments({}),
-      PersonModel.aggregate([{ $group: { _id: '$type', count: { $sum: 1 } } }]),
+      PersonModel.countDocuments({ deleted_at: null }),
+      PersonModel.aggregate([
+        { $match: { deleted_at: null } },
+        { $group: { _id: '$type', count: { $sum: 1 } } },
+      ]),
       VehicleModel.countDocuments({}),
       ScanLogModel.countDocuments({ scan_time: { $gte: today } }),
       ScanLogModel.countDocuments({ scan_time: { $gte: today }, access_result: 'granted' }),
@@ -187,7 +193,11 @@ export const dashboardService = {
   async userView(personId: string) {
     const oid = new Types.ObjectId(personId);
     const [person, vehicles, today, recent, statusAgg, scans] = await Promise.all([
-      PersonModel.findById(personId).lean(),
+      // deleted_at excluded here too: a soft-deleted person's login is also
+      // deactivated (see personService.softDelete), so this only matters for
+      // an admin looking up /:id/overview by hand — it must 404 the same way
+      // GET /persons/:id does, not resurrect a deleted person's profile.
+      PersonModel.findOne({ _id: personId, deleted_at: null }).lean(),
       VehicleModel.find({ owner_person_id: personId }).sort({ createdAt: -1 }).lean(),
       AttendanceModel.findOne({ person_id: personId, date: todayKey() }).lean(),
       AttendanceModel.find({ person_id: personId }).sort({ date: -1 }).limit(7).lean(),
