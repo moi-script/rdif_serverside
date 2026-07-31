@@ -26,6 +26,7 @@ import { connectDB, disconnectDB } from './db';
 import { PersonModel } from '../modules/persons/persons.model';
 import { UserModel } from '../modules/users/users.model';
 import { VehicleModel } from '../modules/vehicles/vehicles.model';
+import { VehicleApplicationModel } from '../modules/vehicleApplications/vehicleApplications.model';
 import { grantSuperadmin } from './grantSuperadmin';
 
 // Installs the X-Verify-Bypass header on every fetch() this process makes,
@@ -1564,6 +1565,100 @@ async function runChecks(): Promise<void> {
   });
   expectEqual('duplicate plate is still rejected', dupPlate.status, CONFLICT);
 
+  console.log('\n== vehicle applications ==');
+
+  const appStamp = Date.now();
+  const appSuffix = (appStamp % 0xffff).toString(16).toUpperCase().padStart(4, '0');
+
+  const applicantRes = await request(superadmin, 'POST', '/persons', {
+    full_name: 'Gabrielle G. Villareal',
+    type: 'student',
+    id_number: `verify-rbac-app-${appStamp}`, // prefix: PROBE_PERSON_ID_PREFIXES
+    department_section: 'BSIT 4-A',
+    rfid_uid: 'DAD0' + appSuffix,
+  });
+  expectEqual('applicant person created', applicantRes.status, CREATED);
+  const applicant = applicantRes.json.data as { _id?: string; id?: string } | undefined;
+  const applicantId = String(applicant?._id ?? applicant?.id ?? '');
+  expectEqual('applicant has an id', applicantId.length > 0, true);
+
+  const fullApplication = {
+    category: 'new',
+    applicant_type: 'student',
+    vehicle_type: 'motorcycle',
+    owner_person_id: applicantId,
+    id_number: `verify-rbac-app-${appStamp}`,
+    last_name: 'Villareal',
+    first_name: 'Gabrielle',
+    middle_name: 'Garcia',
+    year_level: '4th',
+    school_year: '26-27',
+    mobile_no: '09452610104',
+    permanent_address: 'Dreamville 6 Imus, Cavite',
+    driver_name: 'Gabrielle G. Villareal',
+    lto_cr_date: '2021-09-30',
+    lto_or_date: '2026-01-05',
+    plate_no: `RBAC-A1-${appSuffix}`, // prefix: PROBE_VEHICLE_PLATE_PREFIXES
+    make: 'Honda',
+    model: 'Adv',
+    year: '2021',
+    color: 'Brown',
+    registered_owner_name: 'Gabrielle G. Villareal',
+    signed_name: 'Gabrielle G. Villareal',
+    signed_date: '2026-06-30',
+    rfid_uid: 'FAB0' + appSuffix,
+  };
+
+  // Authorization: OSS writes, the rest do not.
+  await check('registrar cannot submit an application', registrar, 'POST', '/vehicle-applications', FORBIDDEN, fullApplication);
+  await check('hr cannot submit an application', hr, 'POST', '/vehicle-applications', FORBIDDEN, fullApplication);
+  await check('student cannot submit an application', student, 'POST', '/vehicle-applications', FORBIDDEN, fullApplication);
+
+  const appCreated = await request(oss, 'POST', '/vehicle-applications', fullApplication);
+  expectEqual('oss submits an application', appCreated.status, CREATED);
+  const createdBody = appCreated.json.data as
+    | { application?: { _id?: string; vehicle_id?: string }; vehicle?: { _id?: string; status?: string; valid_until?: string } }
+    | undefined;
+  const applicationId = String(createdBody?.application?._id ?? '');
+  expectEqual('application has an id', applicationId.length > 0, true);
+  expectEqual('a vehicle was created and is active', createdBody?.vehicle?.status, 'active');
+  expectEqual('the vehicle carries an expiry', typeof createdBody?.vehicle?.valid_until, 'string');
+  expectEqual('the application links to its vehicle', typeof createdBody?.application?.vehicle_id, 'string');
+
+  // Shared reads.
+  await check('hr may read applications', hr, 'GET', '/vehicle-applications', OK);
+  await check('registrar may read one application', registrar, 'GET', `/vehicle-applications/${applicationId}`, OK);
+  await check('student may not read applications', student, 'GET', '/vehicle-applications', FORBIDDEN);
+
+  // Immutability is structural — these routes must not exist.
+  const patchAttempt = await request(oss, 'PATCH', `/vehicle-applications/${applicationId}`, { make: 'Yamaha' });
+  expectEqual('applications cannot be edited', [404, 405].includes(patchAttempt.status), true);
+  const deleteAttempt = await request(oss, 'DELETE', `/vehicle-applications/${applicationId}`);
+  expectEqual('applications cannot be deleted', [404, 405].includes(deleteAttempt.status), true);
+
+  // The client's real form left most fields blank. This must succeed.
+  const minimal = await request(oss, 'POST', '/vehicle-applications', {
+    category: 'new',
+    applicant_type: 'student',
+    vehicle_type: 'car',
+    owner_person_id: applicantId,
+    id_number: `verify-rbac-app-${appStamp}`,
+    last_name: 'Villareal',
+    first_name: 'Gabrielle',
+    school_year: '26-27',
+    plate_no: `RBAC-A2-${appSuffix}`,
+    make: 'Toyota',
+    registered_owner_name: 'Gabrielle G. Villareal',
+    signed_name: 'Gabrielle G. Villareal',
+    signed_date: '2026-06-30',
+    rfid_uid: 'FAB1' + appSuffix,
+  });
+  expectEqual('a minimal application is accepted', minimal.status, CREATED);
+
+  // Duplicate plate and duplicate rfid are still rejected, distinctly.
+  const dupApp = await request(oss, 'POST', '/vehicle-applications', { ...fullApplication, plate_no: `RBAC-A1-${appSuffix}`, rfid_uid: 'FAB2' + appSuffix });
+  expectEqual('duplicate plate rejected', dupApp.status, 409);
+
   console.log('\n== records (scan log) ==');
 
   await check('superadmin GET /logs', superadmin, 'GET', '/logs', OK);
@@ -1664,6 +1759,13 @@ async function runChecks(): Promise<void> {
  *     above, so leaving the vehicle behind would orphan it — a strictly
  *     worse defect than the original leak, since GET /vehicles has the same
  *     100-row page cap as /persons and /users.
+ *   - VehicleApplication.plate_no: same 'RBAC-' prefix, reused rather than a
+ *     separate array — an application's plate_no and the vehicle it creates
+ *     always share the same probe plate, and there is deliberately no
+ *     `PATCH`/`DELETE /vehicle-applications/:id` route either (immutability
+ *     is the point of that collection), so this is the only way to remove
+ *     probe applications too. A future probe prefix that only ever touches
+ *     applications (not vehicles) would need its own array — none exists yet.
  * Matching by prefix — not by this run's own stamp — means a run also mops
  * up any litter left by earlier, pre-fix runs, and it is structurally unable
  * to touch a seeded fixture: no seeded username, id_number, or plate_number
@@ -1695,18 +1797,20 @@ const PROBE_USER_USERNAME_PREFIXES = [
 const PROBE_VEHICLE_PLATE_PREFIXES = ['RBAC-'];
 
 /**
- * Removes every Person/User/Vehicle row this harness has ever created (this
- * run's and any earlier run's), so the collections stop growing. Must run
- * even when `runChecks()` throws or logs failures — see the try/finally
- * around its call in `main()` — but must never itself change the process
- * exit code; `summary()` is what decides pass/fail, and it runs after this,
- * untouched.
+ * Removes every Person/User/Vehicle/VehicleApplication row this harness has
+ * ever created (this run's and any earlier run's), so the collections stop
+ * growing. Must run even when `runChecks()` throws or logs failures — see the
+ * try/finally around its call in `main()` — but must never itself change the
+ * process exit code; `summary()` is what decides pass/fail, and it runs after
+ * this, untouched.
  *
- * Vehicles are deleted before Persons: a probe Vehicle's owner_person_id
- * points at a probe Person, and while Mongo enforces no real foreign key
- * here, deleting the referencing row first keeps the intermediate DB state
- * consistent (never a Vehicle pointing at an already-deleted Person) in case
- * this function is ever interrupted between the two deletes.
+ * Applications are deleted before Vehicles, and Vehicles before Persons: a
+ * probe Application's vehicle_id points at a probe Vehicle, which in turn
+ * points at a probe Person via owner_person_id, and while Mongo enforces no
+ * real foreign key here, deleting the referencing row first keeps the
+ * intermediate DB state consistent (never an Application pointing at an
+ * already-deleted Vehicle, nor a Vehicle pointing at an already-deleted
+ * Person) in case this function is ever interrupted between the deletes.
  */
 async function cleanupProbes(): Promise<void> {
   console.log('\n== cleanup: removing probe records this harness created ==');
@@ -1721,10 +1825,21 @@ async function cleanupProbes(): Promise<void> {
   const personRegex = new RegExp(`^(${PROBE_PERSON_ID_PREFIXES.join('|')})`);
   const userRegex = new RegExp(`^(${PROBE_USER_USERNAME_PREFIXES.join('|')})`);
 
+  // VehicleApplication has no unique/DELETE-able probe id of its own — it
+  // reuses the same 'RBAC-' plate prefix as the Vehicle it creates (see the
+  // PROBE_VEHICLE_PLATE_PREFIXES comment above), and must go first: a probe
+  // application whose Vehicle was already deleted would otherwise be an
+  // application pointing at a vanished vehicle_id.
+  const applicationResult = await VehicleApplicationModel.deleteMany({
+    plate_no: { $regex: vehicleRegex },
+  });
   const vehicleResult = await VehicleModel.deleteMany({ plate_number: { $regex: vehicleRegex } });
   const personResult = await PersonModel.deleteMany({ id_number: { $regex: personRegex } });
   const userResult = await UserModel.deleteMany({ username: { $regex: userRegex } });
 
+  console.log(
+    `  removed ${applicationResult.deletedCount} probe vehicle application(s) (plate_no matching ${PROBE_VEHICLE_PLATE_PREFIXES.join(', ')})`
+  );
   console.log(
     `  removed ${vehicleResult.deletedCount} probe vehicle(s) (plate_number matching ${PROBE_VEHICLE_PLATE_PREFIXES.join(', ')})`
   );

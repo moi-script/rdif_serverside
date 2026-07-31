@@ -11,6 +11,7 @@ import { errorHandler } from './middlewares/errorHandler';
 import { authRoutes } from './modules/auth/auth.routes';
 import { personRoutes } from './modules/persons/persons.routes';
 import { vehicleRoutes } from './modules/vehicles/vehicles.routes';
+import { vehicleApplicationRoutes } from './modules/vehicleApplications/vehicleApplications.routes';
 import { gateRoutes } from './modules/gates/gates.routes';
 import { scanRoutes } from './modules/scan/scan.routes';
 import { attendanceRoutes } from './modules/attendance/attendance.routes';
@@ -41,6 +42,7 @@ export function createApp(): Express {
   app.use(`${prefix}/auth`, authRoutes);
   app.use(`${prefix}/persons`, personRoutes);
   app.use(`${prefix}/vehicles`, vehicleRoutes);
+  app.use(`${prefix}/vehicle-applications`, vehicleApplicationRoutes);
   app.use(`${prefix}/gates`, gateRoutes);
   app.use(`${prefix}/scan`, scanRoutes);
   app.use(`${prefix}/occupancy`, occupancyRoutes);

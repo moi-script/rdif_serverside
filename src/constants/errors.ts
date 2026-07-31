@@ -11,6 +11,7 @@ export const ERROR_CODES = {
   DUPLICATE_ID: { status: 409, message: 'ID number already registered' },
   DUPLICATE_PLATE: { status: 409, message: 'Plate number already registered' },
   DUPLICATE_USERNAME: { status: 409, message: 'Username already taken' },
+  CONFLICT: { status: 409, message: 'Request conflicts with existing state' },
   RATE_LIMITED: { status: 429, message: 'Too many requests' },
   INTERNAL_ERROR: { status: 500, message: 'Internal server error' },
 } as const;
