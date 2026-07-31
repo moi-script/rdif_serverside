@@ -7,6 +7,7 @@ import { Actor, assertCanWrite } from '../../utils/authority';
 import { nextSchoolYearEnd } from '../../utils/schoolYear';
 import { personRepo } from '../persons/persons.repository';
 import { vehicleService } from '../vehicles/vehicles.service';
+import { vehicleRepo } from '../vehicles/vehicles.repository';
 
 interface ListQuery {
   page?: string;
@@ -15,6 +16,7 @@ interface ListQuery {
   plate_no?: string;
   school_year?: string;
   category?: string;
+  linked?: string;
 }
 
 export interface CreateApplicationInput {
@@ -60,6 +62,14 @@ export const vehicleApplicationService = {
     if (query.plate_no) filter.plate_no = query.plate_no;
     if (query.school_year) filter.school_year = query.school_year;
     if (query.category) filter.category = query.category;
+    // Because the application is written before the vehicle (see the
+    // write-order comment on create() below), a duplicate rfid/plate on
+    // submission leaves an orphan application with vehicle_id: null that can
+    // never be edited or deleted — by design, applications are immutable.
+    // Without this filter there was no way to even find those orphans to
+    // investigate them. `linked=false` maps to vehicle_id: null exactly.
+    if (query.linked === 'false') filter.vehicle_id = null;
+    else if (query.linked === 'true') filter.vehicle_id = { $ne: null };
     const { items, total } = await vehicleApplicationRepo.findPaginated(filter, p);
     return { items, meta: buildMeta(total, p.page, p.limit) };
   },
@@ -88,6 +98,24 @@ export const vehicleApplicationService = {
 
     const owner = await personRepo.findById(input.owner_person_id);
     if (!owner) throw new ApiError('NOT_FOUND', 'Applicant not found');
+
+    // Pre-check both uniqueness constraints the vehicle write would enforce
+    // anyway. The write order below (application, then vehicle) is load-bearing
+    // and stays as-is — but without this pre-check, the COMMON failure (a
+    // clerk mistypes a plate or RFID that's already registered) writes the
+    // application first, then fails on the vehicle insert, leaving an orphan
+    // application that can never be edited or deleted (immutable by design).
+    // The clerk just resubmits, and the orphan survives forever. This does not
+    // close the race — two concurrent submissions for the same plate can still
+    // both pass this check and one still fails at the vehicle insert, which is
+    // the correct fail-safe behavior for the rare case — it only removes the
+    // everyday typo as a cause of application litter. The real unique indexes
+    // on vehicles.rfid_uid/plate_number remain what actually prevents a
+    // duplicate vehicle from ever being created.
+    const existingRfid = await vehicleRepo.findByRfid(input.rfid_uid);
+    if (existingRfid) throw new ApiError('DUPLICATE_RFID');
+    const existingPlate = await vehicleRepo.findByPlate(input.plate_no);
+    if (existingPlate) throw new ApiError('DUPLICATE_PLATE', 'Plate already registered');
 
     // `model` is destructured out here (not spread through) because the
     // persisted field is named `vehicle_model` — a bare `model` property
