@@ -109,6 +109,28 @@ node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
   ```
   Confirm with `db.vehicles.getIndexes()` that `owner_person_id_1` is gone
   (only `_id_`, `plate_number_1`, and `rfid_uid_1` should remain unique).
+- **A gate tap for a vehicle 500s instead of denying, or the deploy is
+  bringing in a `vehicles` collection from before `valid_until` existed** (an
+  older backup restore, or a manual edit that skipped the field). `valid_until`
+  is `required: true` on the schema, but that is enforced only on write —
+  Mongoose never validates a row already sitting in the database, so a
+  pre-existing row can still have it missing. The gate code fails closed on a
+  missing `valid_until` (denies with `vehicle_expired` and still logs the
+  tap), but check for and backfill any such rows as a deploy step anyway,
+  right after a restore or migration, rather than relying on that fallback
+  indefinitely:
+  ```bash
+  mongosh ncst_rfid --quiet --eval 'db.vehicles.countDocuments({valid_until:{$exists:false}})'
+  mongosh ncst_rfid --quiet --eval 'db.vehicles.updateMany({valid_until:{$exists:false}},{$set:{valid_until:ISODate("2027-03-31T23:59:59.999+08:00")}})'
+  ```
+  Run the `countDocuments` check first — it tells you whether the backfill
+  even applies before you touch anything. The timestamp in the second command
+  is a **local end-of-day** instant (`+08:00`, matching campus time and
+  `nextSchoolYearEnd()`), not a UTC instant — adjust the offset if the
+  deployment's local timezone differs. `npm run seed:test`'s `SEED_RESET`
+  branch does **not** backfill this: it wipes only scan logs and attendance,
+  never vehicles, so a pre-existing legacy row survives a test reseed
+  untouched.
 - **A `verify:*` run reports 429s, or `verify:passback` dies with
   `TypeError: Cannot read properties of undefined (reading 'find')`.** All
   four `verify:*` harnesses send `X-Verify-Bypass: $VERIFY_BYPASS_TOKEN` on

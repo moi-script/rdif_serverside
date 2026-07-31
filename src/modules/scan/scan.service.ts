@@ -76,9 +76,20 @@ export const scanService = {
         if (vehicle.status !== 'active') {
           access_result = 'denied';
           reason = 'inactive_id';
-        } else if (vehicle.valid_until.getTime() < scan_time.getTime()) {
+        } else if (!vehicle.valid_until || vehicle.valid_until.getTime() < scan_time.getTime()) {
           // Expiry is stored as end-of-day local (see nextSchoolYearEnd), so a
           // pass valid until 2027-03-31 works for all of that day.
+          //
+          // `valid_until` is `required: true` on the schema, but that is
+          // enforced only on write — a Vehicle row created before this field
+          // existed (or restored from an older backup, or edited directly in
+          // Mongo) can still have it missing. Treat a missing expiry as
+          // already-expired rather than dereferencing `.getTime()` on
+          // `undefined`: the latter is a raw TypeError thrown before
+          // scanRepo.createLog runs below, which denies the tap AND leaves no
+          // scan log, no anomaly row, nothing an auditor could find. Failing
+          // closed here keeps the same fail-closed posture as the rest of
+          // this function while still logging the denial.
           access_result = 'denied';
           reason = 'vehicle_expired';
         } else {
