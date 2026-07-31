@@ -464,11 +464,39 @@ async function main(): Promise<void> {
 
   console.log('\n== anomaly report ==');
 
+  const anomalyWindowStart = new Date();
   await OccupancyModel.deleteMany({ entity_id: juan._id });
   await tap(superadmin, juanUid, personEntry, 'entry');
   await tap(superadmin, juanUid, personEntry, 'entry'); // already_inside
   await tap(superadmin, juanUid, personExit, 'exit');
   await tap(superadmin, juanUid, personExit, 'exit'); // exit_without_entry
+
+  // The $limit: 500 cap (reports.service.ts's anomalies()) can silently hide
+  // anomalies from an operator who only reads `count`. `total` (a real
+  // countDocuments) and `truncated` must be present and self-consistent so a
+  // caller can tell "500" from "at least 500". scan_logs is real, permanent
+  // scan history that accumulates across every run of this harness (and real
+  // gate traffic) — whether an unfiltered report today lands above or below
+  // the cap depends on that accumulated volume, not on anything this harness
+  // controls, so the assertions below check the CONTRACT for whichever
+  // branch actually happened rather than assuming one.
+  const ANOMALY_CAP = 500; // must match the `$limit: 500` in reports.service.ts's anomalies()
+
+  function assertAnomalyReportContract(
+    label: string,
+    payload: { count: number; total: number; truncated: boolean; rows: unknown[] }
+  ): void {
+    expectEqual(`${label}: anomaly report exposes a total count`, typeof payload.total, 'number');
+    expectEqual(`${label}: anomaly report exposes a truncated flag`, typeof payload.truncated, 'boolean');
+    expectEqual(`${label}: count matches rows.length`, payload.count, payload.rows.length);
+    if (payload.total > ANOMALY_CAP) {
+      expectEqual(`${label}: rows are capped at ${ANOMALY_CAP} when over the cap`, payload.rows.length, ANOMALY_CAP);
+      expectEqual(`${label}: truncated is true when over the cap`, payload.truncated, true);
+    } else {
+      expectEqual(`${label}: total matches rows.length when under the cap`, payload.total, payload.rows.length);
+      expectEqual(`${label}: truncated is false when under the cap`, payload.truncated, false);
+    }
+  }
 
   const report = await request(superadmin, 'GET', '/reports/anomalies');
   expectEqual('superadmin may read the anomaly report', report.status, 200);
@@ -478,16 +506,35 @@ async function main(): Promise<void> {
     truncated: boolean;
     rows: { reason: string; name?: string }[];
   };
-  // The $limit: 500 cap can silently hide anomalies from an operator who only
-  // reads `count`. `total` (a real countDocuments) and `truncated` must be
-  // present and self-consistent so a caller can tell "500" from "at least
-  // 500" — this run's window is nowhere near the cap, so truncated must be
-  // false and total must equal count and rows.length exactly.
-  expectEqual('anomaly report exposes a total count', typeof payload.total, 'number');
-  expectEqual('anomaly report exposes a truncated flag', typeof payload.truncated, 'boolean');
-  expectEqual('total matches rows.length when under the cap', payload.total, payload.rows.length);
-  expectEqual('count still matches rows.length', payload.count, payload.rows.length);
-  expectEqual('truncated is false when under the cap', payload.truncated, false);
+  assertAnomalyReportContract('unfiltered report', payload);
+
+  // Prove the under-cap branch is also reachable and correct, not merely
+  // assumed: narrow the query window to only the rows this run just wrote
+  // (a handful of taps above). That is guaranteed to sit under the cap no
+  // matter how much history has piled up in scan_logs from other runs or
+  // real traffic, so this exercises the other branch of the contract on
+  // every single run. `from` accepts any Date-parseable string (see
+  // dateRange.ts's fallback to native parsing for non-"YYYY-MM-DD" input),
+  // so an ISO timestamp gives exact-instant filtering rather than day
+  // buckets.
+  const narrowReport = await request(
+    superadmin,
+    'GET',
+    `/reports/anomalies?from=${encodeURIComponent(anomalyWindowStart.toISOString())}`
+  );
+  expectEqual('superadmin may read the anomaly report with a narrow window', narrowReport.status, 200);
+  const narrowPayload = (narrowReport.json.data ?? {}) as {
+    count: number;
+    total: number;
+    truncated: boolean;
+    rows: { reason: string; name?: string }[];
+  };
+  // A length floor: without it, an empty result would make "total matches
+  // rows.length" trivially true (0 === 0) even if the endpoint were broken.
+  expectEqual('narrow window actually contains this run\'s anomaly rows', narrowPayload.rows.length >= 2, true);
+  expectEqual('narrow window is under the cap (proves the under-cap branch runs)', narrowPayload.total > ANOMALY_CAP, false);
+  assertAnomalyReportContract('narrow window (under cap)', narrowPayload);
+
   const reasons = payload.rows.map((r) => r.reason);
   expectEqual('passbacks appear in the report', reasons.includes('already_inside'), true);
   expectEqual('orphan exits appear in the report', reasons.includes('exit_without_entry'), true);
