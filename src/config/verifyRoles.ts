@@ -27,6 +27,7 @@ import { PersonModel } from '../modules/persons/persons.model';
 import { UserModel } from '../modules/users/users.model';
 import { VehicleModel } from '../modules/vehicles/vehicles.model';
 import { VehicleApplicationModel } from '../modules/vehicleApplications/vehicleApplications.model';
+import { ApplicationSignatureModel } from '../modules/vehicleApplications/applicationSignatures.model';
 import { grantSuperadmin } from './grantSuperadmin';
 
 // Installs the X-Verify-Bypass header on every fetch() this process makes,
@@ -1659,6 +1660,66 @@ async function runChecks(): Promise<void> {
   const dupApp = await request(oss, 'POST', '/vehicle-applications', { ...fullApplication, plate_no: `RBAC-A1-${appSuffix}`, rfid_uid: 'FAB2' + appSuffix });
   expectEqual('duplicate plate rejected', dupApp.status, 409);
 
+  console.log('\n== application signatures are frozen per application ==');
+
+  // A 1x1 transparent PNG, as raw bytes — the smallest valid signature.
+  const pngBytes = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
+    'base64'
+  );
+
+  async function uploadAppSignature(token: string, appId: string): Promise<number> {
+    const form = new FormData();
+    form.append('signature', new Blob([pngBytes], { type: 'image/png' }), 'sig.png');
+    const res = await fetch(`${BASE}/vehicle-applications/${appId}/signature`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: form,
+    });
+    return res.status;
+  }
+
+  expectEqual('oss uploads an application signature', await uploadAppSignature(oss, applicationId), CREATED);
+  expectEqual('registrar may not upload one', await uploadAppSignature(registrar, applicationId), FORBIDDEN);
+
+  await check('hr may read the application signature', hr, 'GET', `/vehicle-applications/${applicationId}/signature`, OK);
+  await check('student may not read it', student, 'GET', `/vehicle-applications/${applicationId}/signature`, FORBIDDEN);
+
+  // The frozen property: changing the OWNER's personSignature must not change
+  // what this application shows. Both are PNGs, so compare byte length after
+  // uploading a deliberately different-sized image to the person.
+  const before = await fetch(`${BASE}/vehicle-applications/${applicationId}/signature`, {
+    headers: { Authorization: `Bearer ${oss}` },
+  });
+  const beforeBytes = (await before.arrayBuffer()).byteLength;
+  expectEqual('application signature has bytes', beforeBytes > 0, true);
+
+  const personForm = new FormData();
+  const biggerPng = Buffer.concat([pngBytes, Buffer.alloc(64)]);
+  personForm.append('signature', new Blob([biggerPng], { type: 'image/png' }), 'sig.png');
+  await fetch(`${BASE}/persons/${applicantId}/signature`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${superadmin}` },
+    body: personForm,
+  });
+
+  const after = await fetch(`${BASE}/vehicle-applications/${applicationId}/signature`, {
+    headers: { Authorization: `Bearer ${oss}` },
+  });
+  const afterBytes = (await after.arrayBuffer()).byteLength;
+  expectEqual('the application signature is unchanged by a person re-sign', afterBytes, beforeBytes);
+
+  // The frozen document additionally refuses a second signature outright,
+  // rather than silently overwriting the first: CONFLICT, and the stored
+  // bytes must be provably unchanged afterward.
+  const secondUpload = await uploadAppSignature(oss, applicationId);
+  expectEqual('a second signature upload is rejected', secondUpload, CONFLICT);
+  const afterSecondAttempt = await fetch(`${BASE}/vehicle-applications/${applicationId}/signature`, {
+    headers: { Authorization: `Bearer ${oss}` },
+  });
+  const afterSecondAttemptBytes = (await afterSecondAttempt.arrayBuffer()).byteLength;
+  expectEqual('stored signature bytes unchanged after a rejected second upload', afterSecondAttemptBytes, afterBytes);
+
   console.log('\n== records (scan log) ==');
 
   await check('superadmin GET /logs', superadmin, 'GET', '/logs', OK);
@@ -1825,6 +1886,20 @@ async function cleanupProbes(): Promise<void> {
   const personRegex = new RegExp(`^(${PROBE_PERSON_ID_PREFIXES.join('|')})`);
   const userRegex = new RegExp(`^(${PROBE_USER_USERNAME_PREFIXES.join('|')})`);
 
+  // ApplicationSignature has no probe prefix of its own — it hangs off
+  // application_id, so the probe applications must be looked up first and
+  // their signatures deleted before the applications themselves go, mirroring
+  // the ordering below that deletes Vehicles before Persons: never delete a
+  // row before the thing that references it.
+  const probeApplications = await VehicleApplicationModel.find({
+    plate_no: { $regex: vehicleRegex },
+  })
+    .select('_id')
+    .lean();
+  const signatureResult = await ApplicationSignatureModel.deleteMany({
+    application_id: { $in: probeApplications.map((a) => a._id) },
+  });
+
   // VehicleApplication has no unique/DELETE-able probe id of its own — it
   // reuses the same 'RBAC-' plate prefix as the Vehicle it creates (see the
   // PROBE_VEHICLE_PLATE_PREFIXES comment above), and must go first: a probe
@@ -1837,6 +1912,9 @@ async function cleanupProbes(): Promise<void> {
   const personResult = await PersonModel.deleteMany({ id_number: { $regex: personRegex } });
   const userResult = await UserModel.deleteMany({ username: { $regex: userRegex } });
 
+  console.log(
+    `  removed ${signatureResult.deletedCount} probe application signature(s) (application_id matching probe applications)`
+  );
   console.log(
     `  removed ${applicationResult.deletedCount} probe vehicle application(s) (plate_no matching ${PROBE_VEHICLE_PLATE_PREFIXES.join(', ')})`
   );

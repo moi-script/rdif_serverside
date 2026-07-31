@@ -40,3 +40,4 @@ function uploadImage(field: string, maxBytes: number) {
 
 export const uploadPhoto = uploadImage('photo', MAX_PHOTO_BYTES);
 export const uploadSignature = uploadImage('signature', MAX_SIGNATURE_BYTES);
+export const uploadApplicationSignature = uploadImage('signature', MAX_SIGNATURE_BYTES);
