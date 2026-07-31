@@ -14,6 +14,10 @@ export const personController = {
     const { items, meta } = await personService.list(req.query);
     sendSuccess(res, items, 200, meta);
   }),
+  listDeleted: asyncHandler(async (req: Request, res: Response) => {
+    const { items, meta } = await personService.listDeleted(req.query);
+    sendSuccess(res, items, 200, meta);
+  }),
   export: asyncHandler(async (req: Request, res: Response) => {
     const csv = await personService.exportCsv(req.query);
     const date = new Date().toISOString().slice(0, 10);

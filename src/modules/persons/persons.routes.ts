@@ -50,6 +50,15 @@ personRoutes.use(
 personRoutes.get('/', personController.list);
 personRoutes.get('/sections', personController.sections);
 personRoutes.get('/export', personController.export);
+
+// Declared before `/:id` on purpose — Express matches in declaration order,
+// and `/:id` would otherwise capture 'deleted' as an id (see the
+// `bulk-status` comment in users.routes.ts for the same trap). Superadmin
+// only, layered on top of the router-level guard above: the deleted view
+// exists solely so a superadmin can find someone to restore, not as a wider
+// directory read for registrar/hr/oss.
+personRoutes.get('/deleted', authorize(ROLES.SUPERADMIN), personController.listDeleted);
+
 personRoutes.get('/:id/overview', personController.overview);
 personRoutes.get('/:id', personController.get);
 personRoutes.post('/', validate(createPersonSchema), personController.create);

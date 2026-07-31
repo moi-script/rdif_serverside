@@ -38,6 +38,23 @@ export const personRepo = {
   findByRfid: (rfid_uid: string) => PersonModel.findOne({ rfid_uid, ...notDeleted }),
 
   /**
+   * The deliberate counterpart to `notDeleted` above, and the only read in
+   * this file that returns soft-deleted rows. It exists so a superadmin has
+   * a way to find someone to hand to POST /:id/restore — without it, restore
+   * is an endpoint nobody can reach once the deleting page is reloaded.
+   * Like findPaginated, `deleted_at` is spread last so no caller-supplied
+   * filter can widen this back to "everyone."
+   */
+  async findDeletedPaginated(filter: FilterQuery<IPerson>, p: PaginationParams) {
+    const scoped = { ...filter, deleted_at: { $ne: null } };
+    const [items, total] = await Promise.all([
+      PersonModel.find(scoped).sort({ createdAt: -1 }).skip(p.skip).limit(p.limit).lean(),
+      PersonModel.countDocuments(scoped),
+    ]);
+    return { items, total };
+  },
+
+  /**
    * Deliberately does NOT exclude soft-deleted rows. Its only caller is the
    * duplicate check in personService.create, and id_number is never cleared
    * on delete (a student number should not be recycled) — the unique index

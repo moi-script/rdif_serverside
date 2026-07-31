@@ -2226,6 +2226,65 @@ async function runChecks(): Promise<void> {
   });
   expectEqual('their card is still blocked after restore',
     (victimTapAfterRestore.json.data as { reason?: string })?.reason, 'card_blocked');
+
+  console.log('\n== GET /persons/deleted: the only way to find someone to restore ==');
+
+  // A fresh throwaway, never a seeded fixture — deletion is one-way at the
+  // database level even though restore exists, and this proves the recovery
+  // path stays reachable after the deleting page reloads (no session-only
+  // client state involved, since this harness never held one).
+  const dlistStamp = Date.now();
+  const dlistIdNumber = `verify-rbac-dlist-${dlistStamp}`; // prefix: PROBE_PERSON_ID_PREFIXES
+  const dlistRfid = 'FACE' + (dlistStamp % 0xffff).toString(16).toUpperCase().padStart(4, '0');
+
+  const dlistRes = await request(superadmin, 'POST', '/persons', {
+    full_name: 'Deleted List Probe',
+    type: 'student',
+    id_number: dlistIdNumber,
+    department_section: 'BSIT 4-A',
+    rfid_uid: dlistRfid,
+  });
+  expectEqual('deleted-list probe created', dlistRes.status, CREATED);
+  const dlistPersonId = idOf(dlistRes);
+  expectEqual('deleted-list probe has an id', dlistPersonId.length > 0, true);
+
+  // Authorization first, on the not-yet-deleted probe — proves the route is
+  // superadmin-only regardless of what it returns.
+  await check('registrar cannot list deleted persons', registrar, 'GET', '/persons/deleted', FORBIDDEN);
+  await check('hr cannot list deleted persons', hr, 'GET', '/persons/deleted', FORBIDDEN);
+  await check('superadmin can list deleted persons', superadmin, 'GET', '/persons/deleted', OK);
+
+  await check('superadmin deletes the deleted-list probe', superadmin, 'DELETE', `/persons/${dlistPersonId}`, OK);
+
+  // Both halves, asserted separately: a build that returned everyone from
+  // /persons/deleted (no deleted_at filter at all) would still pass "probe
+  // present" alone, and a build that still excluded deleted rows entirely
+  // would pass "absent from /persons" alone. Only both together prove the
+  // new read actually targets deleted_at: { $ne: null }.
+  const deletedListRes = await request(superadmin, 'GET', `/persons/deleted?search=${dlistIdNumber}`);
+  expectEqual('GET /persons/deleted responds 200', deletedListRes.status, OK);
+  const deletedListRows = (deletedListRes.json.data ?? []) as { _id?: string; id?: string }[];
+  expectEqual(
+    'the deleted probe appears in GET /persons/deleted',
+    deletedListRows.some((p) => String(p._id ?? p.id) === dlistPersonId),
+    true
+  );
+
+  const activeListRes = await request(superadmin, 'GET', `/persons?search=${dlistIdNumber}`);
+  const activeListRows = (activeListRes.json.data ?? []) as unknown[];
+  expectEqual('the deleted probe is absent from GET /persons', activeListRows.length, 0);
+
+  // Restore it, both to prove the endpoint's whole reason for existing
+  // (finding someone to restore) and to leave the run in the same
+  // re-runnable state every other section here does.
+  await check('superadmin restores the deleted-list probe', superadmin, 'POST', `/persons/${dlistPersonId}/restore`, OK);
+  const deletedListAfterRestore = await request(superadmin, 'GET', `/persons/deleted?search=${dlistIdNumber}`);
+  const deletedListAfterRestoreRows = (deletedListAfterRestore.json.data ?? []) as { _id?: string; id?: string }[];
+  expectEqual(
+    'the restored probe is gone from GET /persons/deleted',
+    deletedListAfterRestoreRows.some((p) => String(p._id ?? p.id) === dlistPersonId),
+    false
+  );
 }
 
 /**

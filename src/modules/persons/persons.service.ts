@@ -18,30 +18,48 @@ interface ListQuery {
   search?: string;
 }
 
+/**
+ * Shared by list(), listDeleted(), and exportCsv() — the search/type/section
+ * semantics must stay identical between the active directory and the
+ * deleted-people view, or "Show deleted" would silently behave like a
+ * different search than the one a superadmin just ran on the main list.
+ */
+function buildListFilter(query: ListQuery): FilterQuery<IPerson> {
+  const filter: FilterQuery<IPerson> = {};
+  if (query.type) filter.type = query.type;
+  if (query.status) filter.status = query.status;
+  if (query.section) filter.department_section = query.section;
+  if (query.search) {
+    const rx = { $regex: query.search, $options: 'i' };
+    filter.$or = [{ full_name: rx }, { id_number: rx }];
+  }
+  return filter;
+}
+
 export const personService = {
   async list(query: ListQuery) {
     const p = getPagination(query as Record<string, unknown>);
-    const filter: FilterQuery<IPerson> = {};
-    if (query.type) filter.type = query.type;
-    if (query.status) filter.status = query.status;
-    if (query.section) filter.department_section = query.section;
-    if (query.search) {
-      const rx = { $regex: query.search, $options: 'i' };
-      filter.$or = [{ full_name: rx }, { id_number: rx }];
-    }
+    const filter = buildListFilter(query);
     const { items, total } = await personRepo.findPaginated(filter, p);
     return { items, meta: buildMeta(total, p.page, p.limit) };
   },
 
+  /**
+   * The counterpart to list(): the only service method that surfaces
+   * soft-deleted people, so a superadmin has something to search and
+   * restore. Deliberately not a flag on list() — that would mean threading
+   * "include deleted" through findPaginated's filter, which is exactly the
+   * override notDeleted's spread-last position exists to prevent.
+   */
+  async listDeleted(query: ListQuery) {
+    const p = getPagination(query as Record<string, unknown>);
+    const filter = buildListFilter(query);
+    const { items, total } = await personRepo.findDeletedPaginated(filter, p);
+    return { items, meta: buildMeta(total, p.page, p.limit) };
+  },
+
   async exportCsv(query: ListQuery): Promise<string> {
-    const filter: FilterQuery<IPerson> = {};
-    if (query.type) filter.type = query.type;
-    if (query.status) filter.status = query.status;
-    if (query.section) filter.department_section = query.section;
-    if (query.search) {
-      const rx = { $regex: query.search, $options: 'i' };
-      filter.$or = [{ full_name: rx }, { id_number: rx }];
-    }
+    const filter = buildListFilter(query);
     const rows = await personRepo.findAll(filter);
     const header =
       'full_name,type,id_number,department_section,contact_email,photo_url,rfid_uid';
