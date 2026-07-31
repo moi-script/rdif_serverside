@@ -93,7 +93,7 @@ async function request(
 interface TapData {
   access_result: 'granted' | 'denied';
   reason: string | null;
-  person?: { full_name: string };
+  person?: { full_name: string; registered?: unknown };
 }
 
 /** Taps as a superadmin, which names the gate in the body (see scan.routes.ts). */
@@ -309,6 +309,15 @@ async function main(): Promise<void> {
   // see who the system thinks is inside. A future "harmonise the denial
   // branches" refactor that cleared it here would go green without this.
   expectEqual('already_inside denial keeps identity', second.person?.full_name, 'Juan Dela Cruz');
+  // The gate deliberately KEEPS identity on an already_inside denial so a guard
+  // can resolve it, but must never reveal what that person has registered — a
+  // denied tap is the case most likely to involve someone holding a card that
+  // isn't theirs. The attachment is guarded on access_result === 'granted', so
+  // this holds by control flow; pinning it means a future refactor that splits
+  // that guard per-branch cannot quietly undo it. Juan owns active vehicles
+  // (seed:test), so this fails for the right reason rather than passing
+  // vacuously against an owner with nothing registered.
+  expectEqual('already_inside denial does not reveal registrations', second.person?.registered, undefined);
 
   const out = await tap(superadmin, juanUid, personExit, 'exit');
   expectEqual('exit granted', out.access_result, 'granted');
