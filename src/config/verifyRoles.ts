@@ -29,6 +29,7 @@ import { VehicleModel } from '../modules/vehicles/vehicles.model';
 import { VehicleApplicationModel } from '../modules/vehicleApplications/vehicleApplications.model';
 import { ScanLogModel } from '../modules/scan/scan.model';
 import { ApplicationSignatureModel } from '../modules/vehicleApplications/applicationSignatures.model';
+import { BlockedCardModel } from '../modules/blockedCards/blockedCards.model';
 import { grantSuperadmin } from './grantSuperadmin';
 
 // Installs the X-Verify-Bypass header on every fetch() this process makes,
@@ -2046,6 +2047,66 @@ async function runChecks(): Promise<void> {
   expectEqual('a deleted person is denied at the gate', ghostBody?.access_result, 'denied');
   expectEqual('the reason is unregistered_uid', ghostBody?.reason, 'unregistered_uid');
   expectEqual('a deleted person leaks no identity', ghostBody?.person, undefined);
+
+  console.log('\n== blocked cards ==');
+
+  const blkStamp = Date.now();
+  const blkSuffix = (blkStamp % 0xffff).toString(16).toUpperCase().padStart(4, '0');
+  const oldUid = 'BEEF' + blkSuffix;
+  const newUid = 'CAFE' + blkSuffix;
+
+  const holderRes = await request(superadmin, 'POST', '/persons', {
+    full_name: 'Card Holder Probe',
+    type: 'student',
+    id_number: `verify-rbac-card-${blkStamp}`, // prefix: PROBE_PERSON_ID_PREFIXES
+    department_section: 'BSIT 4-A',
+    rfid_uid: oldUid,
+  });
+  expectEqual('card holder created', holderRes.status, CREATED);
+  const holder = holderRes.json.data as { _id?: string; id?: string } | undefined;
+  const holderId = String(holder?._id ?? holder?.id ?? '');
+
+  // Replace the card. The old UID must die.
+  const replaced = await request(superadmin, 'PATCH', `/persons/${holderId}/rfid`, { rfid_uid: newUid });
+  expectEqual('card replaced', replaced.status, OK);
+
+  // 1. The old card is refused at the gate, as BLOCKED, with no identity.
+  const blockedTap = await request(superadmin, 'POST', '/scan/tap', {
+    rfid_uid: oldUid, gate_id: personGateId, direction: 'entry',
+  });
+  const blockedBody = blockedTap.json.data as { access_result?: string; reason?: string; person?: unknown };
+  expectEqual('a replaced card is denied', blockedBody?.access_result, 'denied');
+  expectEqual('the reason is card_blocked', blockedBody?.reason, 'card_blocked');
+  expectEqual('a blocked card leaks no identity', blockedBody?.person, undefined);
+
+  // 2. The new card works. Release the occupancy it creates.
+  const newTap = await request(superadmin, 'POST', '/scan/tap', {
+    rfid_uid: newUid, gate_id: personGateId, direction: 'entry',
+  });
+  expectEqual('the new card is granted', (newTap.json.data as { access_result?: string })?.access_result, 'granted');
+  await request(superadmin, 'POST', '/scan/tap', {
+    rfid_uid: newUid, gate_id: personGateId, direction: 'exit',
+  });
+
+  // 3. The block holds at the point of issue, on every path.
+  await check('a blocked UID cannot be registered to a person', superadmin, 'POST', '/persons', 409, {
+    full_name: 'Blocked Reuse Probe', type: 'student',
+    id_number: `verify-rbac-card-b-${blkStamp}`, rfid_uid: oldUid,
+  });
+  await check('a blocked UID cannot be reassigned', superadmin, 'PATCH', `/persons/${holderId}/rfid`, 409, {
+    rfid_uid: oldUid,
+  });
+  await check('a blocked UID cannot be given to a vehicle', oss, 'POST', '/vehicles', 409, {
+    owner_person_id: holderId, plate_number: `BLK-${blkSuffix}`,
+    rfid_uid: oldUid, vehicle_type: 'car', make: 'Toyota',
+  });
+
+  // 4. A blocked tap must not move occupancy — it is a denial like any other.
+  const rosterAfterBlocked = await request(superadmin, 'GET', '/occupancy?limit=100');
+  expectEqual('occupancy roster read succeeded', rosterAfterBlocked.status, OK);
+  const insideNames = ((rosterAfterBlocked.json.data ?? []) as { name?: string }[]);
+  expectEqual('a blocked tap put nobody inside',
+    insideNames.some((r) => r.name === 'Card Holder Probe'), false);
 }
 
 /**
@@ -2105,6 +2166,11 @@ const PROBE_USER_USERNAME_PREFIXES = [
   'rbac-', // rbac-peer-hr, rbac-peer-reg, rbac-peer-super, rbac-api-super, rbac-oss-login, rbac-no-such-user
 ];
 const PROBE_VEHICLE_PLATE_PREFIXES = ['RBAC-'];
+// BlockedCard.rfid_uid: 'BEEF' (the outgoing UID retired by the blocked-cards
+// block's PATCH /persons/:id/rfid — see the '== blocked cards ==' section
+// above). The replacement UID ('CAFE'-prefixed) is never blocked during this
+// harness, so it needs no prefix of its own here.
+const PROBE_BLOCKED_CARD_PREFIXES = ['BEEF'];
 
 /**
  * Removes every Person/User/Vehicle/VehicleApplication row this harness has
@@ -2134,6 +2200,16 @@ async function cleanupProbes(): Promise<void> {
   const vehicleRegex = new RegExp(`^(${PROBE_VEHICLE_PLATE_PREFIXES.join('|')})`);
   const personRegex = new RegExp(`^(${PROBE_PERSON_ID_PREFIXES.join('|')})`);
   const userRegex = new RegExp(`^(${PROBE_USER_USERNAME_PREFIXES.join('|')})`);
+  const blockedCardRegex = new RegExp(`^(${PROBE_BLOCKED_CARD_PREFIXES.join('|')})`);
+
+  // BlockedCard rows reference a probe Person via previous_person_id, so they
+  // must go before the Person delete below — mirroring the
+  // Application-before-Vehicle-before-Person ordering already used here. An
+  // accumulation defect from getting this order wrong has broken these
+  // harnesses twice before.
+  const blockedCardResult = await BlockedCardModel.deleteMany({
+    rfid_uid: { $regex: blockedCardRegex },
+  });
 
   // ApplicationSignature has no probe prefix of its own — it hangs off
   // application_id, so the probe applications must be looked up first and
@@ -2169,6 +2245,9 @@ async function cleanupProbes(): Promise<void> {
   );
   console.log(
     `  removed ${vehicleResult.deletedCount} probe vehicle(s) (plate_number matching ${PROBE_VEHICLE_PLATE_PREFIXES.join(', ')})`
+  );
+  console.log(
+    `  removed ${blockedCardResult.deletedCount} probe blocked card(s) (rfid_uid matching ${PROBE_BLOCKED_CARD_PREFIXES.join(', ')})`
   );
   console.log(
     `  removed ${personResult.deletedCount} probe person(s) (id_number matching ${PROBE_PERSON_ID_PREFIXES.join(', ')})`

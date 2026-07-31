@@ -12,6 +12,7 @@ export const ERROR_CODES = {
   DUPLICATE_PLATE: { status: 409, message: 'Plate number already registered' },
   DUPLICATE_USERNAME: { status: 409, message: 'Username already taken' },
   CONFLICT: { status: 409, message: 'Request conflicts with existing state' },
+  CARD_BLOCKED: { status: 409, message: 'This card has been permanently blocked and cannot be reused' },
   RATE_LIMITED: { status: 429, message: 'Too many requests' },
   INTERNAL_ERROR: { status: 500, message: 'Internal server error' },
 } as const;

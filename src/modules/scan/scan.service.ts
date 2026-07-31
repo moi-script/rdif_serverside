@@ -5,6 +5,7 @@ import { attendanceRepo } from '../attendance/attendance.repository';
 import { personRepo } from '../persons/persons.repository';
 import { vehicleRepo } from '../vehicles/vehicles.repository';
 import { gateRepo } from '../gates/gates.repository';
+import { blockedCardRepo } from '../blockedCards/blockedCards.repository';
 import { ApiError } from '../../utils/ApiError';
 import { env } from '../../config/env';
 import { occupancyRepo } from '../occupancy/occupancy.repository';
@@ -54,71 +55,83 @@ export const scanService = {
 
     const scan_time = new Date();
 
-    // Resolve entity by RFID: person first, then vehicle
-    const person = await personRepo.findByRfid(input.rfid_uid);
     let entity_type: 'person' | 'vehicle' = 'person';
     let entity_id: Types.ObjectId | null = null;
     let access_result: 'granted' | 'denied' = 'denied';
     let reason: string | null = 'unregistered_uid';
     let personView: TapResult['person'];
 
-    if (person) {
-      entity_type = 'person';
-      entity_id = person._id;
-      if (person.status === 'active') {
-        access_result = 'granted';
-        reason = null;
-      } else {
-        access_result = 'denied';
-        reason = 'inactive_id';
-      }
-      // Identity is shown for a grant AND for an inactive-ID denial, so a guard
-      // can tell "deactivated student" from "unregistered stranger". The
-      // wrong_gate_type check below clears this for the one denial that must
-      // not leak who the cardholder is.
-      personView = {
-        full_name: person.full_name,
-        type: person.type,
-        department_section: person.department_section ?? null,
-        photo_url: person.photo_url,
-      };
+    // A blocked card is refused before we look up what it used to be. It is
+    // checked first because a blocked UID must never resolve to an identity:
+    // the card may be in the wrong hands, which is why it was retired.
+    //
+    // Like every denial, this sits before the anti-passback block, so a blocked
+    // card can never move anyone's inside/outside state.
+    if (await blockedCardRepo.isBlocked(input.rfid_uid)) {
+      access_result = 'denied';
+      reason = 'card_blocked';
+      // personView is deliberately left undefined.
     } else {
-      const vehicle = await vehicleRepo.findByRfid(input.rfid_uid);
-      if (vehicle) {
-        entity_type = 'vehicle';
-        entity_id = vehicle._id;
-        if (vehicle.status !== 'active') {
-          access_result = 'denied';
-          reason = 'inactive_id';
-        } else if (!vehicle.valid_until || vehicle.valid_until.getTime() < scan_time.getTime()) {
-          // Expiry is stored as end-of-day local (see nextSchoolYearEnd), so a
-          // pass valid until 2027-03-31 works for all of that day.
-          //
-          // `valid_until` is `required: true` on the schema, but that is
-          // enforced only on write — a Vehicle row created before this field
-          // existed (or restored from an older backup, or edited directly in
-          // Mongo) can still have it missing. Treat a missing expiry as
-          // already-expired rather than dereferencing `.getTime()` on
-          // `undefined`: the latter is a raw TypeError thrown before
-          // scanRepo.createLog runs below, which denies the tap AND leaves no
-          // scan log, no anomaly row, nothing an auditor could find. Failing
-          // closed here keeps the same fail-closed posture as the rest of
-          // this function while still logging the denial.
-          access_result = 'denied';
-          reason = 'vehicle_expired';
-        } else {
+      // Resolve entity by RFID: person first, then vehicle
+      const person = await personRepo.findByRfid(input.rfid_uid);
+      if (person) {
+        entity_type = 'person';
+        entity_id = person._id;
+        if (person.status === 'active') {
           access_result = 'granted';
           reason = null;
+        } else {
+          access_result = 'denied';
+          reason = 'inactive_id';
         }
-        const owner = await personRepo.findById(String(vehicle.owner_person_id));
+        // Identity is shown for a grant AND for an inactive-ID denial, so a guard
+        // can tell "deactivated student" from "unregistered stranger". The
+        // wrong_gate_type check below clears this for the one denial that must
+        // not leak who the cardholder is.
         personView = {
-          full_name: owner?.full_name ?? 'Unknown owner',
-          type: 'vehicle',
-          owner_type: owner?.type,
-          department_section: owner?.department_section ?? null,
-          plate_number: vehicle.plate_number,
-          vehicle: { vehicle_type: vehicle.vehicle_type, make: vehicle.make },
+          full_name: person.full_name,
+          type: person.type,
+          department_section: person.department_section ?? null,
+          photo_url: person.photo_url,
         };
+      } else {
+        const vehicle = await vehicleRepo.findByRfid(input.rfid_uid);
+        if (vehicle) {
+          entity_type = 'vehicle';
+          entity_id = vehicle._id;
+          if (vehicle.status !== 'active') {
+            access_result = 'denied';
+            reason = 'inactive_id';
+          } else if (!vehicle.valid_until || vehicle.valid_until.getTime() < scan_time.getTime()) {
+            // Expiry is stored as end-of-day local (see nextSchoolYearEnd), so a
+            // pass valid until 2027-03-31 works for all of that day.
+            //
+            // `valid_until` is `required: true` on the schema, but that is
+            // enforced only on write — a Vehicle row created before this field
+            // existed (or restored from an older backup, or edited directly in
+            // Mongo) can still have it missing. Treat a missing expiry as
+            // already-expired rather than dereferencing `.getTime()` on
+            // `undefined`: the latter is a raw TypeError thrown before
+            // scanRepo.createLog runs below, which denies the tap AND leaves no
+            // scan log, no anomaly row, nothing an auditor could find. Failing
+            // closed here keeps the same fail-closed posture as the rest of
+            // this function while still logging the denial.
+            access_result = 'denied';
+            reason = 'vehicle_expired';
+          } else {
+            access_result = 'granted';
+            reason = null;
+          }
+          const owner = await personRepo.findById(String(vehicle.owner_person_id));
+          personView = {
+            full_name: owner?.full_name ?? 'Unknown owner',
+            type: 'vehicle',
+            owner_type: owner?.type,
+            department_section: owner?.department_section ?? null,
+            plate_number: vehicle.plate_number,
+            vehicle: { vehicle_type: vehicle.vehicle_type, make: vehicle.make },
+          };
+        }
       }
     }
 

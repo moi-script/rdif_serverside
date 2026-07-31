@@ -6,6 +6,7 @@ import { getPagination, buildMeta } from '../../utils/pagination';
 import { ROLES, personDomain } from '../../constants/roles';
 import { Actor, assertCanWrite, assertCanActOn } from '../../utils/authority';
 import { userRepo } from '../users/users.repository';
+import { blockedCardRepo } from '../blockedCards/blockedCards.repository';
 
 interface ListQuery {
   page?: string;
@@ -84,6 +85,10 @@ export const personService = {
     if (data.rfid_uid) {
       const existing = await personRepo.findByRfid(data.rfid_uid);
       if (existing) throw new ApiError('DUPLICATE_RFID');
+      // A block enforced only at the barrier would be no block at all: a
+      // retired UID could be re-registered here and would then resolve
+      // normally at the gate. See scan.service.tap for the other half.
+      if (await blockedCardRepo.isBlocked(data.rfid_uid)) throw new ApiError('CARD_BLOCKED');
     } else {
       data.status = data.status ?? 'pending';
     }
@@ -174,8 +179,25 @@ export const personService = {
   },
 
   async reassignRfid(id: string, rfid_uid: string, actor: Actor) {
+    const existing = await personRepo.findById(id);
+    if (!existing) throw new ApiError('NOT_FOUND', 'Person not found');
+    if (await blockedCardRepo.isBlocked(rfid_uid)) throw new ApiError('CARD_BLOCKED');
     const clash = await personRepo.findByRfid(rfid_uid);
     if (clash && String(clash._id) !== id) throw new ApiError('DUPLICATE_RFID');
-    return this.update(id, { rfid_uid }, actor);
+
+    const updated = await this.update(id, { rfid_uid }, actor);
+    // Block AFTER the swap succeeds: blocking first would kill the old card
+    // even if the reassignment then failed, stranding the person with no
+    // working card at all. This is the one place in this feature that fails
+    // OPEN on purpose — everywhere else fails closed.
+    if (existing.rfid_uid && existing.rfid_uid !== rfid_uid) {
+      await blockedCardRepo.block({
+        rfid_uid: existing.rfid_uid,
+        source: 'card_replaced',
+        previous_person_id: existing._id,
+        blocked_by: actor.id,
+      });
+    }
+    return updated;
   },
 };

@@ -8,6 +8,7 @@ import { nextSchoolYearEnd } from '../../utils/schoolYear';
 import { personRepo } from '../persons/persons.repository';
 import { vehicleService } from '../vehicles/vehicles.service';
 import { vehicleRepo } from '../vehicles/vehicles.repository';
+import { blockedCardRepo } from '../blockedCards/blockedCards.repository';
 
 interface ListQuery {
   page?: string;
@@ -114,6 +115,12 @@ export const vehicleApplicationService = {
     // duplicate vehicle from ever being created.
     const existingRfid = await vehicleRepo.findByRfid(input.rfid_uid);
     if (existingRfid) throw new ApiError('DUPLICATE_RFID');
+    // Pre-checked here too, not just in vehicleService.create below: without
+    // this, a blocked UID would write the application first (paperwork
+    // survives) and only fail on the vehicle insert, leaving the same kind of
+    // orphan application the DUPLICATE_RFID/DUPLICATE_PLATE pre-checks above
+    // already exist to avoid.
+    if (await blockedCardRepo.isBlocked(input.rfid_uid)) throw new ApiError('CARD_BLOCKED');
     const existingPlate = await vehicleRepo.findByPlate(input.plate_no);
     if (existingPlate) throw new ApiError('DUPLICATE_PLATE', 'Plate already registered');
 

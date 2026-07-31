@@ -5,6 +5,7 @@ import { ApiError } from '../../utils/ApiError';
 import { getPagination, buildMeta } from '../../utils/pagination';
 import { Actor, assertCanWrite } from '../../utils/authority';
 import { nextSchoolYearEnd } from '../../utils/schoolYear';
+import { blockedCardRepo } from '../blockedCards/blockedCards.repository';
 
 interface ListQuery {
   page?: string;
@@ -31,6 +32,10 @@ export const vehicleService = {
     assertCanWrite(actor, 'vehicle');
     const existingRfid = await vehicleRepo.findByRfid(String(data.rfid_uid));
     if (existingRfid) throw new ApiError('DUPLICATE_RFID');
+    // A block enforced only at the barrier would be no block at all: a
+    // retired UID could be re-registered here and would then resolve
+    // normally at the gate. See scan.service.tap for the other half.
+    if (await blockedCardRepo.isBlocked(String(data.rfid_uid))) throw new ApiError('CARD_BLOCKED');
     const existingPlate = await vehicleRepo.findByPlate(String(data.plate_number));
     if (existingPlate) throw new ApiError('DUPLICATE_PLATE', 'Plate already registered');
     return vehicleRepo.create({ ...data, valid_until: data.valid_until ?? nextSchoolYearEnd() });
