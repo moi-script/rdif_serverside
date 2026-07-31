@@ -21,7 +21,16 @@ interface TapResult {
   access_result: 'granted' | 'denied';
   reason: string | null;
   scan_time: Date;
-  person?: { full_name: string; type: string; photo_url?: string; plate_number?: string };
+  person?: {
+    full_name: string;
+    type: string;
+    owner_type?: string;
+    department_section: string | null;
+    photo_url?: string;
+    plate_number?: string;
+    vehicle?: { vehicle_type: string; make?: string };
+    registered?: { vehicle_type: string; make?: string }[];
+  };
 }
 
 function dateKey(d: Date): string {
@@ -67,7 +76,12 @@ export const scanService = {
       // can tell "deactivated student" from "unregistered stranger". The
       // wrong_gate_type check below clears this for the one denial that must
       // not leak who the cardholder is.
-      personView = { full_name: person.full_name, type: person.type, photo_url: person.photo_url };
+      personView = {
+        full_name: person.full_name,
+        type: person.type,
+        department_section: person.department_section ?? null,
+        photo_url: person.photo_url,
+      };
     } else {
       const vehicle = await vehicleRepo.findByRfid(input.rfid_uid);
       if (vehicle) {
@@ -100,7 +114,10 @@ export const scanService = {
         personView = {
           full_name: owner?.full_name ?? 'Unknown owner',
           type: 'vehicle',
+          owner_type: owner?.type,
+          department_section: owner?.department_section ?? null,
           plate_number: vehicle.plate_number,
+          vehicle: { vehicle_type: vehicle.vehicle_type, make: vehicle.make },
         };
       }
     }
@@ -155,6 +172,20 @@ export const scanService = {
           reason = 'exit_without_entry';
         }
       }
+    }
+
+    // Registered items are withheld on EVERY denial. A guard resolving a denial
+    // needs to know who, not what that person owns, and a denied tap is the case
+    // most likely to involve someone holding a card that is not theirs. This is
+    // enforced here rather than by the UI declining to render it: a field the
+    // server sends is a field that exists in the response, whoever is looking.
+    //
+    // Placed after wrong_gate_type (which clears personView entirely) and after
+    // the anti-passback block, so it can never resurrect identity on a denial
+    // that deliberately withheld it, nor attach on an already_inside denial.
+    if (access_result === 'granted' && entity_type === 'person' && entity_id && personView) {
+      const owned = await vehicleRepo.findActiveByOwner(entity_id, scan_time);
+      personView.registered = owned.map((v) => ({ vehicle_type: v.vehicle_type, make: v.make }));
     }
 
     await scanRepo.createLog({

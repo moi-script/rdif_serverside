@@ -1,4 +1,4 @@
-import { FilterQuery } from 'mongoose';
+import { FilterQuery, Types } from 'mongoose';
 import { VehicleModel, IVehicle } from './vehicles.model';
 import { PaginationParams } from '../../utils/pagination';
 
@@ -16,4 +16,24 @@ export const vehicleRepo = {
   findByPlate: (plate_number: string) => VehicleModel.findOne({ plate_number }),
   updateById: (id: string, data: Partial<IVehicle>) =>
     VehicleModel.findByIdAndUpdate(id, data, { new: true }).lean(),
+
+  /**
+   * Every vehicle this person may currently use: active, and not past its
+   * expiry as of `asOf`.
+   *
+   * Deliberately NOT a revival of findByOwner, which was removed when the
+   * one-vehicle-per-person rule was dropped. This one is scoped to what a gate
+   * should display: showing an expired pass would tell a guard the opposite of
+   * the truth. `asOf` is passed in rather than read from the clock here so the
+   * caller compares against the tap's own scan_time, in local time.
+   */
+  findActiveByOwner: (owner_person_id: Types.ObjectId, asOf: Date) =>
+    VehicleModel.find({
+      owner_person_id,
+      status: 'active',
+      valid_until: { $gte: asOf },
+    })
+      .select('vehicle_type make')
+      .sort({ createdAt: -1 })
+      .lean(),
 };

@@ -675,6 +675,109 @@ async function main(): Promise<void> {
   const revoked = await tap(gateKey(firstKey ?? ''), { rfid_uid: 'A1B2C3D4' });
   expectEqual('revoked key rejected', revoked.status, 401);
 
+  console.log('\n== monitor output: identity detail ==');
+
+  // A granted person tap carries the department, and an array (never undefined).
+  // Uses secondKey rather than firstKey: firstKey (Main Entrance's first-minted
+  // key) was revoked by the second mint above and is only still useful here as
+  // the "revoked key rejected" negative case near the end of this file.
+  // secondKey is the live Main Entrance key at this point in the run.
+  const juanTap = await tap(gateKey(secondKey), { rfid_uid: 'A1B2C3D4' });
+  const juanPerson = (juanTap.json.data as { person?: Record<string, unknown> })?.person;
+  expectEqual('granted person tap returns a person block', Boolean(juanPerson), true);
+  expectEqual('granted person tap carries department_section', juanPerson?.department_section, 'BSIT - 4A');
+  expectEqual('granted person tap carries a registered array', Array.isArray(juanPerson?.registered), true);
+
+  // Juan owns the seeded vehicle NCST-1234, so his registered list must name it.
+  const juanRegistered = (juanPerson?.registered ?? []) as { vehicle_type?: string; make?: string }[];
+  expectEqual('registered list is non-empty for a vehicle owner', juanRegistered.length > 0, true);
+  expectEqual('registered entry carries a vehicle_type', typeof juanRegistered[0]?.vehicle_type, 'string');
+  expectEqual('registered entry carries a make', typeof juanRegistered[0]?.make, 'string');
+
+  // Release the occupancy that tap created, so the run stays re-runnable.
+  await tap(gateKey(sideKey ?? ''), { rfid_uid: 'A1B2C3D4' });
+
+  // A person with no vehicle gets an EMPTY array, not undefined. Pedro (2025-0003)
+  // owns none. Distinguishing "nothing registered" from "we didn't look" is the point.
+  const pedroTap = await tap(gateKey(secondKey), { rfid_uid: 'C3D4E5F6' });
+  const pedroPerson = (pedroTap.json.data as { person?: Record<string, unknown> })?.person;
+  expectEqual('a person with no vehicle still gets an array', Array.isArray(pedroPerson?.registered), true);
+  expectEqual('that array is empty, not undefined', (pedroPerson?.registered as unknown[])?.length, 0);
+  await tap(gateKey(sideKey ?? ''), { rfid_uid: 'C3D4E5F6' });
+
+  // A vehicle tap carries the OWNER's type and the vehicle's own detail.
+  const vehTap = await tap(gateKey(parkingKey), { rfid_uid: 'E5F6A7B8' });
+  const vehPerson = (vehTap.json.data as { person?: Record<string, unknown> })?.person;
+  expectEqual('vehicle tap carries the owner department', typeof vehPerson?.department_section, 'string');
+  expectEqual('vehicle tap carries owner_type', typeof vehPerson?.owner_type, 'string');
+  expectEqual('vehicle tap owner_type is not the discriminator', vehPerson?.owner_type !== 'vehicle', true);
+  const vehDetail = vehPerson?.vehicle as { vehicle_type?: string; make?: string } | undefined;
+  expectEqual('vehicle tap carries vehicle detail', typeof vehDetail?.vehicle_type, 'string');
+  if (!parkingOutKey) throw new Error('parking exit key minting did not return a key');
+  await tap(gateKey(parkingOutKey), { rfid_uid: 'E5F6A7B8' });
+
+  // THE PRIVACY RULE: an inactive_id denial shows WHO but not WHAT THEY OWN.
+  //
+  // try/finally is mandatory, for the same reason as the expiry block below: a
+  // throw between deactivating and reactivating leaves a SEEDED PERSON
+  // permanently inactive, and every later run then fails on a card that should
+  // work — a failure that looks like a product bug and costs real time to trace.
+  await request(superadmin, 'PATCH', `/persons/${personId}/status`, { status: 'inactive' });
+  try {
+    const deniedTap = await tap(gateKey(secondKey), { rfid_uid: 'A1B2C3D4' });
+    const deniedData = deniedTap.json.data as { access_result?: string; reason?: string; person?: Record<string, unknown> };
+    expectEqual('an inactive card is denied', deniedData?.access_result, 'denied');
+    expectEqual('the reason is inactive_id', deniedData?.reason, 'inactive_id');
+    expectEqual('a denial still names the person', typeof deniedData?.person?.full_name, 'string');
+    expectEqual('a denial still shows the department', typeof deniedData?.person?.department_section, 'string');
+    expectEqual('a denial does NOT reveal registrations', deniedData?.person?.registered, undefined);
+  } finally {
+    await request(superadmin, 'PATCH', `/persons/${personId}/status`, { status: 'active' });
+  }
+
+  // wrong_gate_type still reveals nothing at all — existing behaviour, re-pinned
+  // because this task adds fields that could regress it.
+  const wrongGateTap = await tap(gateKey(parkingKey), { rfid_uid: 'A1B2C3D4' });
+  const wrongData = wrongGateTap.json.data as { reason?: string; person?: unknown };
+  expectEqual('a person card at a vehicle gate is wrong_gate_type', wrongData?.reason, 'wrong_gate_type');
+  expectEqual('wrong_gate_type reveals no identity at all', wrongData?.person, undefined);
+
+  // An expired pass must not appear in its owner's registered list — showing it
+  // would tell the guard the opposite of the truth.
+  const vehList = await request(superadmin, 'GET', '/vehicles?limit=100');
+  const ownedVeh = ((vehList.json.data ?? []) as { _id: string; rfid_uid: string; valid_until: string }[])
+    .find((v) => v.rfid_uid === 'E5F6A7B8');
+  expectEqual('seeded vehicle E5F6A7B8 found', Boolean(ownedVeh), true);
+  const keepValidUntil = ownedVeh!.valid_until;
+
+  // Count BEFORE, and assert the count DROPS BY ONE — do not assert it becomes
+  // empty. The seeded owner currently holds TWO active vehicles (NCST-1234 plus
+  // a leftover from vehicle-registration testing), so "expect 0" would fail for
+  // a reason that has nothing to do with expiry. Counting the delta is also
+  // robust to whatever the fixture holds later, and `registered` entries carry
+  // only vehicle_type and make — deliberately no plate — so a specific vehicle
+  // cannot be identified from the list anyway.
+  const beforeTap = await tap(gateKey(secondKey), { rfid_uid: 'A1B2C3D4' });
+  const beforeCount = (((beforeTap.json.data as { person?: { registered?: unknown[] } })?.person
+    ?.registered) ?? []).length;
+  expectEqual('owner has at least one active vehicle before expiry', beforeCount > 0, true);
+  await tap(gateKey(sideKey ?? ''), { rfid_uid: 'A1B2C3D4' });
+
+  try {
+    await request(superadmin, 'PATCH', `/vehicles/${ownedVeh!._id}`, {
+      valid_until: new Date(Date.now() - 86_400_000).toISOString(),
+    });
+    const afterExpiry = await tap(gateKey(secondKey), { rfid_uid: 'A1B2C3D4' });
+    const afterPerson = (afterExpiry.json.data as { person?: { registered?: unknown[] } })?.person;
+    const afterCount = (afterPerson?.registered ?? []).length;
+    expectEqual('an expired vehicle drops out of registered', afterCount, beforeCount - 1);
+    expectEqual('the owner still grants despite an expired vehicle',
+      (afterExpiry.json.data as { access_result?: string })?.access_result, 'granted');
+    await tap(gateKey(sideKey ?? ''), { rfid_uid: 'A1B2C3D4' });
+  } finally {
+    await request(superadmin, 'PATCH', `/vehicles/${ownedVeh!._id}`, { valid_until: keepValidUntil });
+  }
+
   console.log('\n== photo fetch by a gate terminal ==');
   await uploadPhoto(auth(registrar), personId, TINY_JPEG, 'gate.jpg', 'image/jpeg');
   const byGate = await fetch(`${BASE}/persons/${personId}/photo`, {
