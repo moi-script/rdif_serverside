@@ -747,8 +747,8 @@ async function main(): Promise<void> {
   const vehList = await request(superadmin, 'GET', '/vehicles?limit=100');
   const ownedVeh = ((vehList.json.data ?? []) as { _id: string; rfid_uid: string; valid_until: string }[])
     .find((v) => v.rfid_uid === 'E5F6A7B8');
-  expectEqual('seeded vehicle E5F6A7B8 found', Boolean(ownedVeh), true);
-  const keepValidUntil = ownedVeh!.valid_until;
+  if (!ownedVeh) throw new Error('seeded vehicle E5F6A7B8 missing — run npm run seed:test');
+  const keepValidUntil = ownedVeh.valid_until;
 
   // Count BEFORE, and assert the count DROPS BY ONE — do not assert it becomes
   // empty. The seeded owner currently holds TWO active vehicles (NCST-1234 plus
@@ -764,7 +764,7 @@ async function main(): Promise<void> {
   await tap(gateKey(sideKey ?? ''), { rfid_uid: 'A1B2C3D4' });
 
   try {
-    await request(superadmin, 'PATCH', `/vehicles/${ownedVeh!._id}`, {
+    await request(superadmin, 'PATCH', `/vehicles/${ownedVeh._id}`, {
       valid_until: new Date(Date.now() - 86_400_000).toISOString(),
     });
     const afterExpiry = await tap(gateKey(secondKey), { rfid_uid: 'A1B2C3D4' });
@@ -775,7 +775,7 @@ async function main(): Promise<void> {
       (afterExpiry.json.data as { access_result?: string })?.access_result, 'granted');
     await tap(gateKey(sideKey ?? ''), { rfid_uid: 'A1B2C3D4' });
   } finally {
-    await request(superadmin, 'PATCH', `/vehicles/${ownedVeh!._id}`, { valid_until: keepValidUntil });
+    await request(superadmin, 'PATCH', `/vehicles/${ownedVeh._id}`, { valid_until: keepValidUntil });
   }
 
   console.log('\n== photo fetch by a gate terminal ==');
