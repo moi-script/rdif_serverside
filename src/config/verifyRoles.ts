@@ -1992,6 +1992,60 @@ async function runChecks(): Promise<void> {
   // A malformed gate_id must be a clean 422, not a 500 with a leaked BSON
   // message — the same defect the anomaly report shipped with.
   await check('malformed gate_id is 422', superadmin, 'GET', '/logs?gate_id=not-an-id', 422);
+
+  console.log('\n== soft-deleted people are invisible ==');
+
+  const delStamp2 = Date.now();
+  const ghostId = `verify-rbac-ghost-${delStamp2}`; // prefix: PROBE_PERSON_ID_PREFIXES
+  const ghostRfid = 'FEED' + (delStamp2 % 0xffff).toString(16).toUpperCase().padStart(4, '0');
+  const ghostRes = await request(superadmin, 'POST', '/persons', {
+    full_name: 'Ghost Probe',
+    type: 'student',
+    id_number: ghostId,
+    department_section: 'BSIT 4-A',
+    rfid_uid: ghostRfid,
+  });
+  expectEqual('ghost probe created', ghostRes.status, CREATED);
+  const ghostData = ghostRes.json.data as { _id?: string; id?: string } | undefined;
+  const ghostOid = String(ghostData?._id ?? ghostData?.id ?? '');
+  expectEqual('ghost has an id', ghostOid.length > 0, true);
+
+  // Visible before deletion — establishes the check is not vacuous.
+  const beforeList = await request(superadmin, 'GET', `/persons?search=${ghostId}`);
+  expectEqual('ghost is listed before deletion',
+    ((beforeList.json.data ?? []) as unknown[]).length, 1);
+
+  await PersonModel.updateOne({ _id: ghostOid }, { $set: { deleted_at: new Date() } });
+
+  const afterList = await request(superadmin, 'GET', `/persons?search=${ghostId}`);
+  expectEqual('a deleted person is gone from the directory',
+    ((afterList.json.data ?? []) as unknown[]).length, 0);
+
+  const afterGet = await request(superadmin, 'GET', `/persons/${ghostOid}`);
+  expectEqual('a deleted person is a 404 by id', afterGet.status, 404);
+
+  const csv = await request(superadmin, 'GET', '/persons/export');
+  expectEqual('a deleted person is absent from the CSV export',
+    String(csv.json ?? '').includes(ghostId), false);
+
+  const ghostGatesRes = await request(superadmin, 'GET', '/gates');
+  const ghostGateList = (ghostGatesRes.json.data ?? []) as { _id?: string; id?: string; name: string }[];
+  const personGate = ghostGateList.find((g) => g.name === 'Main Entrance');
+  const personGateId = (personGate?._id ?? personGate?.id) as string;
+  expectEqual('a person gate exists for the ghost tap', Boolean(personGateId), true);
+
+  // The card must be refused as if it were never registered. This is what catches
+  // the repository-filter mistake: if findByRfid still resolves a deleted person,
+  // the gate grants while the directory says they are gone.
+  const ghostTap = await request(superadmin, 'POST', '/scan/tap', {
+    rfid_uid: ghostRfid,
+    gate_id: personGateId,
+    direction: 'entry',
+  });
+  const ghostBody = ghostTap.json.data as { access_result?: string; reason?: string; person?: unknown };
+  expectEqual('a deleted person is denied at the gate', ghostBody?.access_result, 'denied');
+  expectEqual('the reason is unregistered_uid', ghostBody?.reason, 'unregistered_uid');
+  expectEqual('a deleted person leaks no identity', ghostBody?.person, undefined);
 }
 
 /**

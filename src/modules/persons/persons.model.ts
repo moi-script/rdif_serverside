@@ -11,6 +11,7 @@ export interface IPerson extends Document {
   signature_url?: string;
   rfid_uid?: string;
   status: 'active' | 'inactive' | 'pending';
+  deleted_at: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -31,6 +32,7 @@ const personSchema = new Schema<IPerson>(
       default: 'active',
       index: true,
     },
+    deleted_at: { type: Date, default: null, index: true },
   },
   { timestamps: true }
 );
