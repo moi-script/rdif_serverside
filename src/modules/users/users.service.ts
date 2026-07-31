@@ -114,15 +114,36 @@ export const userService = {
    * but may not write a person:student record, so HR cannot deactivate a
    * student. See the ruling in the spec's cross-rule interaction 1.
    *
-   * A dangling person_id (User pointing at a deleted Person) has no gate side
-   * to write, so rank alone governs. Do NOT fail closed on it — that turns a
-   * data-integrity problem into what looks like a permissions bug.
+   * A genuinely dangling person_id (User pointing at a Person row that no
+   * longer exists at all) has no gate side to write, so rank alone governs.
+   * Do NOT fail closed on it — that turns a data-integrity problem into what
+   * looks like a permissions bug.
+   *
+   * personRepo.findById is deleted-filtered (see persons.repository.ts), so
+   * it returns null for BOTH a dangling reference and a soft-deleted person —
+   * those are not the same case. A soft-deleted person still has a domain;
+   * the cascade in personService.softDelete deliberately deactivated this
+   * exact login, and skipping the domain guard here would let HR or a
+   * registrar reactivate a deleted student's account, which they could never
+   * touch while that student was still on the roster. A raw PersonModel
+   * lookup with an explicit deleted_at branch is what tells the two cases
+   * apart; only a superadmin may act on a person-backed account whose person
+   * was soft-deleted.
    */
   async assertCanActOnPersonBackedAccount(actor: Actor, target: IUser): Promise<void> {
     assertCanActOn(actor, target);
     if (!target.person_id) return;
-    const person = await personRepo.findById(String(target.person_id));
-    if (!person) return;
+    const person = await PersonModel.findById(String(target.person_id)).lean();
+    if (!person) return; // genuinely dangling reference: no gate side, rank alone governs
+    if (person.deleted_at) {
+      if (actor.role !== 'superadmin') {
+        throw new ApiError(
+          'FORBIDDEN',
+          "This person's account was deleted by an administrator; ask a superadmin to restore it."
+        );
+      }
+      return;
+    }
     assertCanWrite(actor, personDomain(person.type));
   },
 
@@ -169,7 +190,17 @@ export const userService = {
       // which is the safe side to fail on. Do not swap these two lines.
       await userRepo.updateById(id, userUpdate);
       if (target.person_id) {
-        await personRepo.updateById(String(target.person_id), { status: person_status! });
+        // Narrowed with deleted_at: null so this can never produce a record
+        // that is both deleted_at != null and status: 'active' — a state no
+        // screen can explain. assertCanActOnPersonBackedAccount above already
+        // denies non-superadmins on a deleted person; this is the last-resort
+        // guard against the write itself, including for a superadmin who
+        // reactivated the login on purpose but must not silently un-delete
+        // the person's gate status as a side effect.
+        await PersonModel.updateOne(
+          { _id: target.person_id, deleted_at: null },
+          { $set: { status: person_status! } }
+        );
       }
     } else {
       // Deactivating: gate first, then login — if the login write is lost,
@@ -289,7 +320,12 @@ export const userService = {
 
       result = await UserModel.updateMany(userFilter, userUpdate);
       if (personIds.length) {
-        await PersonModel.updateMany({ _id: { $in: personIds } }, { $set: { status: 'active' } });
+        // Narrowed with deleted_at: null for the same reason as setStatus
+        // above — never write status: 'active' onto a soft-deleted person.
+        await PersonModel.updateMany(
+          { _id: { $in: personIds }, deleted_at: null },
+          { $set: { status: 'active' } }
+        );
       }
     } else {
       // Deactivating: gate first, then login. Every targeted person is

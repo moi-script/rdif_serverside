@@ -210,12 +210,31 @@ export const personService = {
     // working card at all. This is the one place in this feature that fails
     // OPEN on purpose — everywhere else fails closed.
     if (existing.rfid_uid && existing.rfid_uid !== rfid_uid) {
-      await blockedCardRepo.block({
-        rfid_uid: existing.rfid_uid,
-        source: 'card_replaced',
-        previous_person_id: existing._id,
-        blocked_by: actor.id,
-      });
+      // block() is a bare create with no retry and no compensation. If it
+      // throws here, the old UID is off the person's record (the swap above
+      // already succeeded) and off the blocklist too — back in the pool,
+      // re-registrable at any of the four issue points, and granted at the
+      // barrier once reissued. That is the ruling's forbidden escape hatch,
+      // reached by failure rather than by feature. We deliberately do not
+      // retry or roll back the swap (see the comment above — that would
+      // strand a real person cardless), but a silent failure here must not
+      // also be a silent one for whoever operates this system, so it is
+      // logged at error level with the UID rather than left to vanish.
+      try {
+        await blockedCardRepo.block({
+          rfid_uid: existing.rfid_uid,
+          source: 'card_replaced',
+          previous_person_id: existing._id,
+          blocked_by: actor.id,
+        });
+      } catch (err) {
+        console.error(
+          `[persons] FAILED to block retired card ${existing.rfid_uid} after reassignRfid ` +
+            `for person ${id} — this UID is now unassigned AND unblocked, and is re-registrable ` +
+            'until manually blocked.',
+          err
+        );
+      }
     }
     return updated;
   },
@@ -238,6 +257,24 @@ export const personService = {
     await VehicleModel.updateMany({ owner_person_id: person._id }, { $set: { status: 'inactive' } });
 
     const retiredUid = person.rfid_uid;
+    // Block BEFORE the person record releases the UID (reverse of
+    // reassignRfid's order, deliberately): the ruling forbids any escape
+    // hatch back into the pool for a deleted person's card, so if only one of
+    // these two writes can land, it must be this one. A blocked-but-still-
+    // assigned UID is the safe direction — blockedCardRepo.isBlocked() is
+    // checked before the $unset below ever matters at any issue point or at
+    // the barrier (scan.service.tap checks the blocklist first), so the card
+    // is already refused either way. The reverse order — $unset then block —
+    // would leave a window where a failed block() call has already returned
+    // the UID to the pool with nothing on record to stop it being reissued.
+    if (retiredUid) {
+      await blockedCardRepo.block({
+        rfid_uid: retiredUid,
+        source: 'person_deleted',
+        previous_person_id: person._id,
+        blocked_by: actor.id,
+      });
+    }
     // Raw $set/$unset, not personRepo.updateById: Mongoose's update-casting
     // silently DROPS a key whose value is `undefined` rather than unsetting
     // it (verified against this repo's mongoose version), so `{ rfid_uid:
@@ -248,14 +285,6 @@ export const personService = {
       $set: { deleted_at: new Date(), status: 'inactive' },
       $unset: { rfid_uid: 1 }, // release the sparse-unique claim
     });
-    if (retiredUid) {
-      await blockedCardRepo.block({
-        rfid_uid: retiredUid,
-        source: 'person_deleted',
-        previous_person_id: person._id,
-        blocked_by: actor.id,
-      });
-    }
 
     const login = await userRepo.findByPersonId(id);
     if (login) {

@@ -1598,6 +1598,72 @@ async function runChecks(): Promise<void> {
   });
   expectEqual('a too-short rfid_uid is rejected at vehicle registration', shortUidVehicle.status, 422);
 
+  console.log('\n== I4: a deleted person\'s vehicle cannot be re-admitted ==');
+
+  // Fresh throwaway owner, then delete them, then prove their vehicle can
+  // neither be created for them after the fact nor reactivated once it
+  // exists — vehicles.service used to resolve owner_person_id nowhere at
+  // all, so PATCH /vehicles/:id/status {status:'active'} on a deleted
+  // person's vehicle would set it active with valid_until still ahead, and
+  // scan.service.tap grants a vehicle from its own status/expiry alone, then
+  // looks up the (now-null) owner — the barrier opens for an "Unknown owner".
+  const i4Stamp = Date.now();
+  const i4Suffix = (i4Stamp % 0xffff).toString(16).toUpperCase().padStart(4, '0');
+  const i4OwnerRes = await request(superadmin, 'POST', '/persons', {
+    full_name: 'I4 Vehicle Owner Probe',
+    type: 'student',
+    id_number: `verify-rbac-i4-${i4Stamp}`, // prefix: PROBE_PERSON_ID_PREFIXES
+    department_section: 'BSIT 4-A',
+    rfid_uid: 'FEED' + i4Suffix,
+  });
+  expectEqual('I4 probe owner created', i4OwnerRes.status, CREATED);
+  const i4OwnerData = i4OwnerRes.json.data as { _id?: string; id?: string } | undefined;
+  const i4OwnerId = String(i4OwnerData?._id ?? i4OwnerData?.id ?? '');
+  expectEqual('I4 probe owner has an id', i4OwnerId.length > 0, true);
+
+  const i4VehicleRes = await request(oss, 'POST', '/vehicles', {
+    owner_person_id: i4OwnerId,
+    plate_number: `RBAC-I4-${i4Suffix}`, // prefix: PROBE_VEHICLE_PLATE_PREFIXES
+    rfid_uid: 'FED0' + i4Suffix,
+    vehicle_type: 'car',
+    make: 'Toyota',
+  });
+  expectEqual('I4 probe vehicle created while owner is active', i4VehicleRes.status, CREATED);
+  const i4VehicleData = i4VehicleRes.json.data as { _id?: string; id?: string } | undefined;
+  const i4VehicleId = String(i4VehicleData?._id ?? i4VehicleData?.id ?? '');
+  expectEqual('I4 probe vehicle has an id', i4VehicleId.length > 0, true);
+
+  // Deleting the owner cascades to 'inactive' on their vehicle (already
+  // covered by the cascade section below) — deactivate it explicitly first
+  // via the owner delete cascade so the reactivation attempt below is
+  // testing the real post-delete state.
+  await check('superadmin deletes the I4 probe owner', superadmin, 'DELETE', `/persons/${i4OwnerId}`, OK);
+
+  const i4Reactivate = await request(superadmin, 'PATCH', `/vehicles/${i4VehicleId}/status`, {
+    status: 'active',
+  });
+  expectEqual(
+    'reactivating a deleted owner\'s vehicle is refused, not granted',
+    i4Reactivate.status,
+    404
+  );
+
+  const i4VehicleAfter = await request(superadmin, 'GET', '/vehicles?limit=100');
+  const i4VehicleRow = ((i4VehicleAfter.json.data ?? []) as { _id: string; status: string }[])
+    .find((v) => v._id === i4VehicleId);
+  expectEqual('the refused reactivation left the vehicle inactive', i4VehicleRow?.status, 'inactive');
+
+  // Creating a NEW vehicle for a deleted owner must be refused too, not just
+  // reactivating an existing one.
+  const i4NewVehicle = await request(oss, 'POST', '/vehicles', {
+    owner_person_id: i4OwnerId,
+    plate_number: `RBAC-I4B-${i4Suffix}`, // prefix: PROBE_VEHICLE_PLATE_PREFIXES (rejected — never persisted)
+    rfid_uid: 'FED1' + i4Suffix,
+    vehicle_type: 'car',
+    make: 'Honda',
+  });
+  expectEqual('creating a vehicle for a deleted owner is refused', i4NewVehicle.status, 404);
+
   console.log('\n== C1: a vehicle with no valid_until fails closed (and still logs) ==');
 
   // A legacy Vehicle row from before this branch's valid_until field existed
@@ -2204,6 +2270,34 @@ async function runChecks(): Promise<void> {
   expectEqual('their vehicle is refused at the barrier',
     (vehTapAfter.json.data as { access_result?: string })?.access_result, 'denied');
 
+  // I5: personRepo.findById is deleted-filtered, so it returns null for BOTH
+  // a dangling person_id AND a soft-deleted person — those used to be
+  // treated as the same case (assertCanActOnPersonBackedAccount returning
+  // early on either), which skipped the domain guard for exactly the
+  // accounts the cascade above just deactivated. Registrar outranks a
+  // student account and HR outranks nobody's domain here either, so both
+  // must still be refused; only a superadmin may act on a person-backed
+  // login whose person was soft-deleted. Run this on the still-deleted
+  // victim, BEFORE restore below clears deleted_at.
+  const vicLoginData = vicLogin.json.data as { id?: string; _id?: string } | undefined;
+  const vicLoginId = String(vicLoginData?.id ?? vicLoginData?._id ?? '');
+  expectEqual('cascade victim login has an id', vicLoginId.length > 0, true);
+
+  await check(
+    'HR cannot reactivate a deleted student\'s login',
+    hr, 'PATCH', `/users/${vicLoginId}/status`, FORBIDDEN, { active: true }
+  );
+  await check(
+    'registrar cannot reactivate a deleted student\'s login either',
+    registrar, 'PATCH', `/users/${vicLoginId}/status`, FORBIDDEN, { active: true }
+  );
+  const vicLoginStillOut = await fetch(`${BASE}/auth/login`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: victimUsername, password: 'Verify@12345' }),
+  });
+  expectEqual('the refused reactivation attempts left the login unusable',
+    vicLoginStillOut.status, 401);
+
   // Restore returns the record, not access.
   await check('registrar cannot restore', registrar, 'POST', `/persons/${victimId}/restore`, FORBIDDEN);
   await check('superadmin restores', superadmin, 'POST', `/persons/${victimId}/restore`, OK);
@@ -2350,11 +2444,19 @@ const PROBE_VEHICLE_PLATE_PREFIXES = ['RBAC-'];
 // BlockedCard.rfid_uid: 'BEEF' (the outgoing UID retired by the blocked-cards
 // block's PATCH /persons/:id/rfid — see the '== blocked cards ==' section
 // above), 'DEAD' (the cascade victim's person UID, blocked by softDelete —
-// see the '== delete cascades, restore does not re-admit ==' section below).
-// The replacement UID ('CAFE'-prefixed) and the vehicle UID ('FACE'-prefixed,
-// never blocked — only deactivated) are never blocked during this harness,
-// so they need no prefix of their own here.
-const PROBE_BLOCKED_CARD_PREFIXES = ['BEEF', 'DEAD'];
+// see the '== delete cascades, restore does not re-admit ==' section below),
+// 'FACE' (the '== GET /persons/deleted ==' probe's own rfid_uid, blocked by
+// softDelete when that probe is removed through DELETE /persons/:id — NOT
+// the vehicle-owner or cascade-victim's vehicle tag, also 'FACE'-prefixed
+// elsewhere in this file, which softDelete never blocks because it only
+// blocks the deleted PERSON's own rfid_uid, and those two are removed via a
+// direct DB delete in cleanupProbes(), not the endpoint under test), 'FEED'
+// (the I4 vehicle-reactivation probe's own person rfid_uid, blocked the same
+// way as the 'FACE' dlist probe when DELETE /persons/:id removes it — NOT
+// its vehicle's 'FED0'/'FED1'-prefixed tags, which softDelete never touches).
+// The replacement UID ('CAFE'-prefixed) is never blocked during this
+// harness, so it needs no prefix of its own here.
+const PROBE_BLOCKED_CARD_PREFIXES = ['BEEF', 'DEAD', 'FACE', 'FEED'];
 
 /**
  * Removes every Person/User/Vehicle/VehicleApplication row this harness has

@@ -6,6 +6,7 @@ import { getPagination, buildMeta } from '../../utils/pagination';
 import { Actor, assertCanWrite } from '../../utils/authority';
 import { nextSchoolYearEnd } from '../../utils/schoolYear';
 import { blockedCardRepo } from '../blockedCards/blockedCards.repository';
+import { personRepo } from '../persons/persons.repository';
 
 interface ListQuery {
   page?: string;
@@ -30,6 +31,13 @@ export const vehicleService = {
   },
   async create(data: Partial<IVehicle>, actor: Actor) {
     assertCanWrite(actor, 'vehicle');
+    // Mirrors vehicleApplicationService.create's owner check: personRepo.findById
+    // is deleted-filtered, so a deleted (or dangling) owner_person_id is refused
+    // here rather than silently accepted and only discovered later at the
+    // barrier, where scan.service.tap would grant the vehicle on status/expiry
+    // alone and then find no owner to show on the terminal.
+    const owner = await personRepo.findById(String(data.owner_person_id));
+    if (!owner) throw new ApiError('NOT_FOUND', 'Vehicle owner not found');
     const existingRfid = await vehicleRepo.findByRfid(String(data.rfid_uid));
     if (existingRfid) throw new ApiError('DUPLICATE_RFID');
     // A block enforced only at the barrier would be no block at all: a
@@ -42,6 +50,20 @@ export const vehicleService = {
   },
   async update(id: string, data: Partial<IVehicle>, actor: Actor) {
     assertCanWrite(actor, 'vehicle');
+    // Fail closed on the activating path only: a deleted person's vehicle
+    // cannot be brought back to 'active' by PATCH .../status or a plain
+    // update that sets status: 'active'. Deactivating, or editing an
+    // already-inactive vehicle, needs no owner check — nothing at the
+    // barrier is being re-armed.
+    if (data.status === 'active') {
+      const current = await vehicleRepo.findById(id);
+      if (!current) throw new ApiError('NOT_FOUND', 'Vehicle not found');
+      const ownerId = data.owner_person_id ?? current.owner_person_id;
+      const owner = await personRepo.findById(String(ownerId));
+      if (!owner) {
+        throw new ApiError('NOT_FOUND', 'Vehicle owner not found or deleted; cannot activate');
+      }
+    }
     const updated = await vehicleRepo.updateById(id, data);
     if (!updated) throw new ApiError('NOT_FOUND', 'Vehicle not found');
     return updated;
