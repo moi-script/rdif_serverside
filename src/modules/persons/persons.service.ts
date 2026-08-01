@@ -8,6 +8,10 @@ import { Actor, assertCanWrite, assertCanActOn } from '../../utils/authority';
 import { userRepo } from '../users/users.repository';
 import { blockedCardRepo } from '../blockedCards/blockedCards.repository';
 import { VehicleModel } from '../vehicles/vehicles.model';
+// The REPOSITORY, not vehicles.service — vehicles.service.ts already imports
+// from the persons side (personRepo), so importing the service here would
+// create an import cycle.
+import { vehicleRepo } from '../vehicles/vehicles.repository';
 
 interface ListQuery {
   page?: string;
@@ -104,6 +108,12 @@ export const personService = {
     if (data.rfid_uid) {
       const existing = await personRepo.findByRfid(data.rfid_uid);
       if (existing) throw new ApiError('DUPLICATE_RFID');
+      // The reverse of the check in vehicleService.create: a UID belongs to a
+      // person OR a vehicle, never both.
+      const vehicleWithRfid = await vehicleRepo.findByRfid(data.rfid_uid);
+      if (vehicleWithRfid) {
+        throw new ApiError('DUPLICATE_RFID', 'That RFID is already assigned to a vehicle');
+      }
       // A block enforced only at the barrier would be no block at all: a
       // retired UID could be re-registered here and would then resolve
       // normally at the gate. See scan.service.tap for the other half.
@@ -203,6 +213,10 @@ export const personService = {
     if (await blockedCardRepo.isBlocked(rfid_uid)) throw new ApiError('CARD_BLOCKED');
     const clash = await personRepo.findByRfid(rfid_uid);
     if (clash && String(clash._id) !== id) throw new ApiError('DUPLICATE_RFID');
+    const vehicleWithRfid = await vehicleRepo.findByRfid(rfid_uid);
+    if (vehicleWithRfid) {
+      throw new ApiError('DUPLICATE_RFID', 'That RFID is already assigned to a vehicle');
+    }
 
     const updated = await this.update(id, { rfid_uid }, actor);
     // Block AFTER the swap succeeds: blocking first would kill the old card

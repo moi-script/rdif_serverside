@@ -115,6 +115,20 @@ export const vehicleApplicationService = {
     // duplicate vehicle from ever being created.
     const existingRfid = await vehicleRepo.findByRfid(input.rfid_uid);
     if (existingRfid) throw new ApiError('DUPLICATE_RFID');
+    // Pre-checked here for the same reason as DUPLICATE_RFID above: without
+    // it, the application writes first and only the vehicle insert fails,
+    // leaving an orphan application that is immutable by design.
+    const personWithRfid = await personRepo.findByRfid(input.rfid_uid);
+    if (personWithRfid) {
+      throw new ApiError('DUPLICATE_RFID', 'That RFID is already assigned to a person');
+    }
+    const activeForOwner = await vehicleRepo.findActiveByOwner(owner._id, new Date());
+    if (activeForOwner.length > 0) {
+      throw new ApiError(
+        'CONFLICT',
+        `${owner.full_name} already has an active vehicle (${activeForOwner[0].plate_number}). Deactivate it first.`
+      );
+    }
     // Pre-checked here too, not just in vehicleService.create below: without
     // this, a blocked UID would write the application first (paperwork
     // survives) and only fail on the vehicle insert, leaving the same kind of

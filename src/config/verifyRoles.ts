@@ -1559,9 +1559,21 @@ async function runChecks(): Promise<void> {
     make: 'Honda',
   });
   expectEqual('first vehicle for this owner', firstVehicle.status, CREATED);
+  const firstVehicleData = firstVehicle.json.data as { _id?: string; id?: string } | undefined;
+  const firstVehicleId = String(firstVehicleData?._id ?? firstVehicleData?.id ?? '');
+  expectEqual('first vehicle has an id', firstVehicleId.length > 0, true);
 
-  // The whole point of dropping the unique index. Before it, this is a
-  // duplicate-key error or the service's own "Owner already has a vehicle".
+  // The whole point of dropping the unique index: a person may hold several
+  // vehicle ROWS. But the one-active-vehicle-per-owner registration guard
+  // (single-card access) means only one of them may be ACTIVE at a time, so
+  // the first is deactivated before the second is registered — otherwise
+  // this would now be a CONFLICT (409), which is that guard working, not a
+  // regression of the multi-row capability being tested here.
+  const deactivateFirstVehicle = await request(oss, 'PATCH', `/vehicles/${firstVehicleId}/status`, {
+    status: 'inactive',
+  });
+  expectEqual('first vehicle deactivated to make room for the second', deactivateFirstVehicle.status, OK);
+
   const secondVehicle = await request(oss, 'POST', '/vehicles', {
     owner_person_id: multiOwnerId,
     plate_number: `RBAC-M2-${multiSuffix}`, // prefix: PROBE_VEHICLE_PLATE_PREFIXES
@@ -1906,6 +1918,26 @@ async function runChecks(): Promise<void> {
   expectEqual('applications cannot be edited', [404, 405].includes(patchAttempt.status), true);
   const deleteAttempt = await request(oss, 'DELETE', `/vehicle-applications/${applicationId}`);
   expectEqual('applications cannot be deleted', [404, 405].includes(deleteAttempt.status), true);
+
+  // The first application's vehicle is still active. Under the
+  // one-active-vehicle-per-owner registration guard (single-card access),
+  // registering a SECOND active vehicle for the same owner (applicantId) is
+  // now a CONFLICT — deactivate the first so the "minimal fields" check below
+  // exercises what it's actually testing (schema defaults) rather than
+  // tripping the unrelated ownership guard.
+  const firstApplicationVehicleId = String(createdBody?.vehicle?._id ?? '');
+  expectEqual('first application vehicle has an id', firstApplicationVehicleId.length > 0, true);
+  const deactivateFirstApplicationVehicle = await request(
+    superadmin,
+    'PATCH',
+    `/vehicles/${firstApplicationVehicleId}/status`,
+    { status: 'inactive' }
+  );
+  expectEqual(
+    'first application vehicle deactivated to make room for the minimal application',
+    deactivateFirstApplicationVehicle.status,
+    OK
+  );
 
   // The client's real form left most fields blank. This must succeed.
   const minimal = await request(oss, 'POST', '/vehicle-applications', {

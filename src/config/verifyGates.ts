@@ -640,6 +640,105 @@ async function main(): Promise<void> {
     'granted'
   );
 
+  console.log('\n== registration guards: one active vehicle + cross-collection UID ==');
+
+  // A person may hold multiple vehicle ROWS but only one ACTIVE at a time:
+  // under single-card the owner is the key, so a second active pass has no
+  // unambiguous resolution at the barrier. Uses its own throwaway owner —
+  // never a seeded fixture — and is soft-deleted in the finally, which also
+  // cascades the first vehicle to 'inactive' (see personService.softDelete).
+  {
+    const stamp = Date.now();
+    const suffix = (stamp % 0xffff).toString(16).toUpperCase().padStart(4, '0');
+    const ownerRes = await request(superadmin, 'POST', '/persons', {
+      full_name: 'Single-Card Guard Owner',
+      type: 'student',
+      id_number: `verify-gates-sc-guard-${stamp}`,
+      department_section: 'BSIT 4-A',
+    });
+    expectEqual('one-active-vehicle guard throwaway owner created', ownerRes.status, 201);
+    const ownerData = ownerRes.json.data as { _id?: string; id?: string } | undefined;
+    const ownerId = String(ownerData?._id ?? ownerData?.id ?? '');
+    expectEqual('one-active-vehicle guard throwaway owner has an id', ownerId.length > 0, true);
+
+    try {
+      const first = await request(superadmin, 'POST', '/vehicles', {
+        owner_person_id: ownerId,
+        plate_number: `SC-TEST-1-${suffix}`,
+        rfid_uid: 'FACE' + suffix,
+        vehicle_type: 'motorcycle',
+        make: 'Honda',
+      });
+      expectEqual('first active vehicle accepted', first.status, 201);
+
+      const second = await request(superadmin, 'POST', '/vehicles', {
+        owner_person_id: ownerId,
+        plate_number: `SC-TEST-2-${suffix}`,
+        rfid_uid: 'FEED' + suffix,
+        vehicle_type: 'car',
+        make: 'Toyota',
+      });
+      expectEqual('second active vehicle rejected', second.status, 409);
+    } finally {
+      // The only "delete" this API offers for a Person; it soft-deletes and
+      // cascades every owned vehicle to inactive (VehicleModel.updateMany in
+      // personService.softDelete). No DELETE /vehicles/:id route exists, so
+      // the SC-TEST vehicle row itself is not removable over HTTP — cleaned
+      // up out-of-band via mongosh as part of this task's verification.
+      const del = await request(superadmin, 'DELETE', `/persons/${ownerId}`);
+      expectEqual('one-active-vehicle guard throwaway owner cleaned up', del.status, 200);
+    }
+  }
+
+  // A UID belongs to a person OR a vehicle, never both. Without this, a
+  // vehicle registered on a person's card is permanently unscannable: the
+  // person lookup always wins (this is how CAV 8832 / rfid_uid 0003461782
+  // was created). D4E5F6A7 is Ana Villanueva's seeded ID card — this attempt
+  // must be rejected before any vehicle row is ever written, so there is
+  // nothing to clean up beyond the throwaway owner used to reach the check.
+  {
+    const stamp = Date.now();
+    const suffix = (stamp % 0xffff).toString(16).toUpperCase().padStart(4, '0');
+    const ownerRes = await request(superadmin, 'POST', '/persons', {
+      full_name: 'Cross-UID Guard Owner',
+      type: 'student',
+      id_number: `verify-gates-xuid-guard-${stamp}`,
+      department_section: 'BSIT 4-A',
+    });
+    expectEqual('cross-UID guard throwaway owner created', ownerRes.status, 201);
+    const ownerData = ownerRes.json.data as { _id?: string; id?: string } | undefined;
+    const ownerId = String(ownerData?._id ?? ownerData?.id ?? '');
+    expectEqual('cross-UID guard throwaway owner has an id', ownerId.length > 0, true);
+
+    try {
+      const r = await request(superadmin, 'POST', '/vehicles', {
+        owner_person_id: ownerId,
+        plate_number: `SC-TEST-3-${suffix}`,
+        rfid_uid: 'D4E5F6A7',
+        vehicle_type: 'car',
+        make: 'Toyota',
+      });
+      expectEqual("person's UID rejected for a vehicle", r.status, 409);
+    } finally {
+      const del = await request(superadmin, 'DELETE', `/persons/${ownerId}`);
+      expectEqual('cross-UID guard throwaway owner cleaned up', del.status, 200);
+    }
+  }
+
+  // And the reverse direction: F6A7B8C9 is Ana's seeded vehicle tag. A
+  // person-create attempt using it must be rejected, and — since the create
+  // fails — no person row is ever written, so there is nothing to delete.
+  {
+    const r = await request(superadmin, 'POST', '/persons', {
+      full_name: 'Reverse Cross-UID Probe',
+      type: 'student',
+      id_number: `verify-gates-xuid-rev-${Date.now()}`,
+      department_section: 'BSIT 4-A',
+      rfid_uid: 'F6A7B8C9',
+    });
+    expectEqual("vehicle's UID rejected for a person", r.status, 409);
+  }
+
   // An exit gate must close the attendance day the entry gate opened.
   const sideGate = gates.find((g) => g.name === 'Side Gate');
   if (!sideGate) throw new Error('Side Gate missing — run npm run seed:test');
