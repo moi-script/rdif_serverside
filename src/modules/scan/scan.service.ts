@@ -120,7 +120,6 @@ export const scanService = {
               const v = owned[0];
               entity_type = 'vehicle';
               entity_id = v._id;
-              // eslint-disable-next-line @typescript-eslint/no-unused-vars -- consumed by Task 2's companion occupancy/attendance writes, not yet added
               companionPersonId = person._id;
               access_result = 'granted';
               reason = null;
@@ -215,6 +214,29 @@ export const scanService = {
           reason = 'already_inside';
           // personView is deliberately KEPT: a guard needs to see who the
           // system thinks is inside in order to resolve it.
+        } else if (companionPersonId) {
+          // BEST-EFFORT, and deliberately second. The vehicle row above is
+          // authoritative and is what the anti-passback check runs on. There
+          // is no transaction here (standalone Mongo), so these two writes
+          // cannot be atomic — and denying on a failure would be worse than
+          // tolerating one, because the deny happens AFTER the vehicle row
+          // already moved: it would record a car inside the lot while
+          // keeping the barrier shut, and unwinding needs a compensating
+          // release that can itself fail. Worst case here is a car correctly
+          // in the lot whose driver's attendance is missing, which this log
+          // line surfaces.
+          //
+          // 'already_inside' is benign, not an error: the person may have
+          // walked in through a person gate earlier.
+          try {
+            await occupancyRepo.enter('person', companionPersonId, gateOid, boundary);
+          } catch (err) {
+            console.error(
+              `[scan] companion person occupancy failed on entry for ${companionPersonId.toString()}; ` +
+                'vehicle admitted anyway (best-effort)',
+              err
+            );
+          }
         }
       } else {
         // Egress is never blocked, including when occupancy itself is
@@ -235,6 +257,21 @@ export const scanService = {
         }
         if (outcome === 'exit_without_entry') {
           reason = 'exit_without_entry';
+        }
+        if (companionPersonId) {
+          // Best-effort, same reasoning as entry. A person already outside is
+          // SILENT rather than an anomaly: they may have walked out through a
+          // person gate and returned on foot. The vehicle release above
+          // carries the anomaly signal for this tap.
+          try {
+            await occupancyRepo.release('person', companionPersonId, gateOid, boundary);
+          } catch (err) {
+            console.error(
+              `[scan] companion person release failed on exit for ${companionPersonId.toString()}; ` +
+                'granting anyway (fail-open)',
+              err
+            );
+          }
         }
       }
     }
@@ -264,18 +301,21 @@ export const scanService = {
       scan_time,
     });
 
-    // Attendance rollup only for granted person taps
-    if (access_result === 'granted' && entity_type === 'person' && entity_id) {
+    // The person this tap is attributable to: the cardholder on a person tap,
+    // or the owner whose card opened a vehicle gate. A vehicle TAG tap has
+    // neither and correctly writes no attendance.
+    const attendancePersonId = entity_type === 'person' ? entity_id : companionPersonId;
+    if (access_result === 'granted' && attendancePersonId) {
       const key = dateKey(scan_time);
       if (input.direction === 'entry') {
         await attendanceRepo.upsertTimeIn(
-          String(entity_id),
+          String(attendancePersonId),
           key,
           scan_time,
           isLate(scan_time) ? 'late' : 'present'
         );
       } else {
-        await attendanceRepo.upsertTimeOut(String(entity_id), key, scan_time);
+        await attendanceRepo.upsertTimeOut(String(attendancePersonId), key, scan_time);
       }
     }
 

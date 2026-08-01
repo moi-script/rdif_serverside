@@ -726,6 +726,117 @@ async function main(): Promise<void> {
     await tap(gateKey(parkingOutKey), { rfid_uid: 'F6A7B8C9' });
   }
 
+  console.log('\n== single-card attendance: companion occupancy and attendance writes ==');
+
+  // Drive in at the parking barrier with an ID card, then leave ON FOOT at a
+  // person gate. Before single-card this exit returned exit_without_entry and
+  // the day's attendance showed the person was never on campus, because as a
+  // PERSON they were never marked inside. This is the defect the feature
+  // exists to fix, so it is pinned.
+  {
+    if (!parkingKey || !parkingOutKey || !sideKey) throw new Error('key minting did not return a key');
+    const drive = await tap(gateKey(parkingKey), { rfid_uid: 'D4E5F6A7' });
+    expectEqual(
+      'drive-in grants',
+      (drive.json.data as { access_result?: string } | undefined)?.access_result,
+      'granted'
+    );
+
+    const walkOut = await tap(gateKey(sideKey), { rfid_uid: 'D4E5F6A7' });
+    expectEqual(
+      'walk-out after drive-in grants',
+      (walkOut.json.data as { access_result?: string } | undefined)?.access_result,
+      'granted'
+    );
+    expectEqual(
+      'walk-out is not an anomaly',
+      (walkOut.json.data as { reason?: string | null } | undefined)?.reason,
+      null
+    );
+
+    // The vehicle is still in the lot — only the person left.
+    const stillIn = await tap(gateKey(parkingKey), { rfid_uid: 'F6A7B8C9' });
+    expectEqual(
+      'vehicle still inside after owner walked out',
+      (stillIn.json.data as { reason?: string } | undefined)?.reason,
+      'already_inside'
+    );
+
+    // Verify the attendance rollup itself wrote a time_in — the roster row
+    // alone does not prove the rollup ran, since occupancy and attendance are
+    // separate writes.
+    const ana = await findPersonByIdNumber(superadmin, 'EMP-1001');
+    const today = localDateKey(new Date());
+    const anaAtt = await request(
+      superadmin,
+      'GET',
+      `/attendance?person_id=${ana._id}&from=${today}&to=${today}&limit=5`
+    );
+    const anaRows = (anaAtt.json.data ?? []) as { time_in?: string | null }[];
+    // upsertTimeIn only sets time_in on the FIRST tap of the day (see
+    // attendance.repository.ts), unlike time_out which is refreshed on every
+    // exit — so a recency assertion here would fail on a same-day re-run.
+    // Existence is what proves the companion attendance write ran at all.
+    expectEqual('an attendance row exists for the owner today', anaRows.length >= 1, true);
+    expectEqual('owner-card drive-in wrote a time_in', !!anaRows[0]?.time_in, true);
+
+    await tap(gateKey(parkingOutKey), { rfid_uid: 'F6A7B8C9' });
+  }
+
+  // Anti-passback still runs on the VEHICLE row, which is authoritative. A
+  // second owner-card entry denies, and because the deny happens on the
+  // vehicle write the companion person write must never be attempted — a
+  // denied tap must not move anyone's state. The person-gate exit afterwards
+  // proves it: if the companion had run, Ana would be inside and the exit
+  // would report released rather than exit_without_entry.
+  {
+    if (!parkingKey || !parkingOutKey || !sideKey) throw new Error('key minting did not return a key');
+    const first = await tap(gateKey(parkingKey), { rfid_uid: 'D4E5F6A7' });
+    expectEqual(
+      'first owner-card entry grants',
+      (first.json.data as { access_result?: string } | undefined)?.access_result,
+      'granted'
+    );
+    await tap(gateKey(sideKey), { rfid_uid: 'D4E5F6A7' }); // person leaves on foot
+
+    const second = await tap(gateKey(parkingKey), { rfid_uid: 'D4E5F6A7' });
+    expectEqual(
+      'second owner-card entry denies',
+      (second.json.data as { access_result?: string } | undefined)?.access_result,
+      'denied'
+    );
+    expectEqual(
+      'second owner-card entry reason',
+      (second.json.data as { reason?: string } | undefined)?.reason,
+      'already_inside'
+    );
+
+    const after = await tap(gateKey(sideKey), { rfid_uid: 'D4E5F6A7' });
+    expectEqual(
+      'denied entry wrote no companion occupancy',
+      (after.json.data as { reason?: string } | undefined)?.reason,
+      'exit_without_entry'
+    );
+    await tap(gateKey(parkingOutKey), { rfid_uid: 'F6A7B8C9' });
+  }
+
+  // A vehicle TAG must NOT mark its owner present. A sticker identifies a
+  // car, not the human driving it. Without this, anyone borrowing the car
+  // would silently mark the owner present on campus.
+  {
+    if (!parkingKey || !parkingOutKey || !sideKey) throw new Error('key minting did not return a key');
+    await tap(gateKey(parkingKey), { rfid_uid: 'F6A7B8C9' });
+    // Ana was never marked inside as a person, so a person-gate exit is an
+    // anomaly — which is exactly the signal proving no companion write ran.
+    const r = await tap(gateKey(sideKey), { rfid_uid: 'D4E5F6A7' });
+    expectEqual(
+      'vehicle tag does not mark owner present',
+      (r.json.data as { reason?: string } | undefined)?.reason,
+      'exit_without_entry'
+    );
+    await tap(gateKey(parkingOutKey), { rfid_uid: 'F6A7B8C9' });
+  }
+
   // A person card at a PERSON gate is unchanged by this feature.
   {
     const r = await tap(gateKey(secondKey), { rfid_uid: 'B2C3D4E5' });
