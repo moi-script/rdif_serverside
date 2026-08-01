@@ -6,7 +6,21 @@
  * Run with: npm run verify:gates
  */
 import { detectImageType } from '../utils/imageType';
+// Imported BEFORE installVerifyBypass, not just alongside it: db.ts pulls in
+// config/env.ts, whose top-level dotenv.config() call is what actually
+// populates process.env.VERIFY_BYPASS_TOKEN from .env. verifyBypass.ts reads
+// that var from process.env at ITS OWN module-evaluation time (a one-shot
+// top-level const, not a lazy read), so if this import came after
+// installVerifyBypass's, the token would still be unset when the bypass
+// module captured it and every request in this file would run under the
+// real rate limits regardless of .env. verifyRoles.ts already relies on this
+// same ordering (there, an earlier middlewares/rateLimiter import pulls in
+// env.ts first) — this makes verifyGates.ts do it explicitly rather than by
+// accident of some other import's side effect.
+import { connectDB, disconnectDB } from './db';
 import { installVerifyBypass } from './verifyBypass';
+import { VehicleModel } from '../modules/vehicles/vehicles.model';
+import { PersonModel } from '../modules/persons/persons.model';
 
 // Installs the X-Verify-Bypass header on every fetch() this process makes,
 // once, before any request goes out — see verifyBypass.ts and the matching
@@ -153,7 +167,7 @@ const TINY_JPEG = Buffer.from(
   'base64'
 );
 
-async function main(): Promise<void> {
+async function runChecks(): Promise<void> {
   console.log('\n== magic-byte detection ==');
   expectEqual('jpeg detected', detectImageType(JPEG), 'image/jpeg');
   expectEqual('png detected', detectImageType(PNG), 'image/png');
@@ -1136,8 +1150,69 @@ async function main(): Promise<void> {
   // terminal until someone runs seed:test again.
   const restored = await uploadPhoto(auth(registrar), personId, TINY_JPEG, 'restore.jpg', 'image/jpeg');
   expectEqual('seeded photo restored for the primary demo person after the run', restored.status, 201);
+}
 
-  summary();
+/**
+ * Mongo is used here ONLY for teardown, never for an assertion — every check
+ * above still goes through the API, matching the "verifyGates has no Mongo
+ * connection for assertions" rule. verifyRoles.ts's cleanupProbes() is the
+ * precedent for this exact pattern: a prefix-matched sweep, run on every
+ * invocation, so it also mops up rows left by EARLIER runs, not just this
+ * one.
+ *
+ * Without this, every verify:gates run leaked one dead Vehicle row forever:
+ * DELETE /persons/:id only soft-deletes the throwaway owner and cascades
+ * their vehicle(s) to 'inactive' (personService.softDelete's
+ * VehicleModel.updateMany) — it does not remove the vehicle document, and
+ * there is no DELETE /vehicles/:id route to do that over the API.
+ *
+ * Matching by prefix, not by this run's own timestamp, is what lets the
+ * sweep also catch earlier runs' litter. Both prefixes are structurally
+ * unable to touch a seeded fixture: seeded plates are 'NCST-' (never
+ * 'SC-TEST'), and seeded id_numbers are '2025-000n' / 'EMP-100n' (never
+ * 'verify-gates-'). 'verify-gates-' alone covers every throwaway person this
+ * file creates (the one-active-vehicle guard's owner, and the cross-UID
+ * guard's owner) — the third guard check (vehicle's UID rejected for a
+ * person) is a rejected POST /persons and creates no row to sweep.
+ */
+const PROBE_VEHICLE_PLATE_PREFIX = 'SC-TEST';
+const PROBE_PERSON_ID_PREFIX = 'verify-gates-';
+
+async function cleanupProbes(): Promise<void> {
+  console.log('\n== cleanup: removing probe vehicle/person rows this and earlier runs left behind ==');
+  const vehicleRegex = new RegExp(`^${PROBE_VEHICLE_PLATE_PREFIX}`);
+  const personRegex = new RegExp(`^${PROBE_PERSON_ID_PREFIX}`);
+  // Vehicle before Person: a probe Vehicle's owner_person_id points at a
+  // probe Person, so removing the referencing row first keeps intermediate
+  // state consistent if this is ever interrupted mid-sweep.
+  const vehicleResult = await VehicleModel.deleteMany({ plate_number: { $regex: vehicleRegex } });
+  const personResult = await PersonModel.deleteMany({ id_number: { $regex: personRegex } });
+  console.log(
+    `  removed ${vehicleResult.deletedCount} probe vehicle(s) (plate_number matching /^${PROBE_VEHICLE_PLATE_PREFIX}/)`
+  );
+  console.log(
+    `  removed ${personResult.deletedCount} probe person(s) (id_number matching /^${PROBE_PERSON_ID_PREFIX}/)`
+  );
+}
+
+/**
+ * Cleanup must run whether runChecks() throws or passes — see verifyRoles.ts
+ * main() for the identical reasoning. summary() is the only thing allowed to
+ * decide the process exit code, and it must run strictly after cleanup so a
+ * red run's non-zero exit is never skipped by an interrupted sweep.
+ */
+async function main(): Promise<void> {
+  await connectDB();
+  try {
+    try {
+      await runChecks();
+    } finally {
+      await cleanupProbes();
+    }
+    summary();
+  } finally {
+    await disconnectDB();
+  }
 }
 
 main().catch((err) => {
