@@ -60,6 +60,12 @@ export const scanService = {
     let access_result: 'granted' | 'denied' = 'denied';
     let reason: string | null = 'unregistered_uid';
     let personView: TapResult['person'];
+    // Set ONLY on a granted owner-card resolution: the person whose card
+    // opened a vehicle gate. Drives the companion occupancy and attendance
+    // writes in Task 2. Null on every other path, including vehicle-tag taps
+    // — a sticker identifies a car, a card identifies a person, and only the
+    // latter is evidence that the human was present.
+    let companionPersonId: Types.ObjectId | null = null;
 
     // A blocked card is refused before we look up what it used to be. It is
     // checked first because a blocked UID must never resolve to an identity:
@@ -75,25 +81,71 @@ export const scanService = {
       // Resolve entity by RFID: person first, then vehicle
       const person = await personRepo.findByRfid(input.rfid_uid);
       if (person) {
-        entity_type = 'person';
-        entity_id = person._id;
-        if (person.status === 'active') {
-          access_result = 'granted';
-          reason = null;
-        } else {
-          access_result = 'denied';
-          reason = 'inactive_id';
-        }
-        // Identity is shown for a grant AND for an inactive-ID denial, so a guard
-        // can tell "deactivated student" from "unregistered stranger". The
-        // wrong_gate_type check below clears this for the one denial that must
-        // not leak who the cardholder is.
+        // Identity view shared by every person-resolved outcome below. The
+        // granted owner-card path REPLACES it with the vehicle-shaped view.
         personView = {
           full_name: person.full_name,
           type: person.type,
           department_section: person.department_section ?? null,
           photo_url: person.photo_url,
         };
+
+        if (gate.type === 'vehicle') {
+          // Single-card access. The card IS correct for this gate, so the
+          // denials here are about the holder's registration, never
+          // wrong_gate_type. Entity stays 'person' on a denial so the scan
+          // log records who was refused; only a grant becomes the vehicle.
+          entity_type = 'person';
+          entity_id = person._id;
+          if (person.status !== 'active') {
+            // Ordered BEFORE the vehicle lookup on purpose: a deactivated ID
+            // is an identity problem, and reporting "no vehicle registered"
+            // for it would send a guard after the wrong thing.
+            access_result = 'denied';
+            reason = 'inactive_id';
+          } else {
+            const owned = await vehicleRepo.findActiveByOwner(person._id, scan_time);
+            if (owned.length === 0) {
+              access_result = 'denied';
+              reason = 'no_vehicle_registered';
+            } else if (owned.length > 1) {
+              // Registration enforces one active vehicle per owner, so this
+              // is a safety net for rows that predate that rule. Refusing to
+              // guess is the point: granting here would log a plate nobody
+              // verified into the scan log, the occupancy roster and the
+              // anomaly report.
+              access_result = 'denied';
+              reason = 'multiple_vehicles';
+            } else {
+              const v = owned[0];
+              entity_type = 'vehicle';
+              entity_id = v._id;
+              // eslint-disable-next-line @typescript-eslint/no-unused-vars -- consumed by Task 2's companion occupancy/attendance writes, not yet added
+              companionPersonId = person._id;
+              access_result = 'granted';
+              reason = null;
+              personView = {
+                full_name: person.full_name,
+                type: 'vehicle',
+                owner_type: person.type,
+                department_section: person.department_section ?? null,
+                photo_url: person.photo_url,
+                plate_number: v.plate_number,
+                vehicle: { vehicle_type: v.vehicle_type, make: v.make },
+              };
+            }
+          }
+        } else {
+          entity_type = 'person';
+          entity_id = person._id;
+          if (person.status === 'active') {
+            access_result = 'granted';
+            reason = null;
+          } else {
+            access_result = 'denied';
+            reason = 'inactive_id';
+          }
+        }
       } else {
         const vehicle = await vehicleRepo.findByRfid(input.rfid_uid);
         if (vehicle) {

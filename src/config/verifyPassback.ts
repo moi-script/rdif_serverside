@@ -362,11 +362,16 @@ async function main(): Promise<void> {
   expectEqual('exit against a fresh inside row has no reason', freshExit.reason, null);
   await OccupancyModel.deleteMany({ entity_id: juan._id });
 
-  // A denied tap must not move anyone's state. Tapping a person card at a
-  // VEHICLE gate is denied for wrong_gate_type before occupancy is consulted;
-  // if it leaked through, the entry below would come back already_inside.
+  // A denied tap must not move anyone's state. Tapping Juan's person card at
+  // a VEHICLE gate is denied before occupancy is consulted — single-card
+  // access resolves his owner-card at the barrier, and since he owns TWO
+  // active vehicles (the seeded multiple_vehicles fixture) the barrier
+  // refuses to guess which one rather than granting; if it leaked through,
+  // the entry below would come back already_inside. (Prior to single-card
+  // access this denied for wrong_gate_type instead — the denial-does-not-
+  // move-state guarantee under test here is unchanged, only the reason is.)
   const wrongGate = await tap(superadmin, juanUid, vehicleEntry, 'entry');
-  expectEqual('person card at a vehicle gate denied', wrongGate.reason, 'wrong_gate_type');
+  expectEqual('person card at a vehicle gate denied', wrongGate.reason, 'multiple_vehicles');
   const afterWrongGate = await tap(superadmin, juanUid, personEntry, 'entry');
   expectEqual('a denied tap left state untouched', afterWrongGate.access_result, 'granted');
   await tap(superadmin, juanUid, personExit, 'exit');

@@ -427,10 +427,16 @@ async function main(): Promise<void> {
   expectEqual('log records the key\'s gate, not the body\'s', latest[0]?.gate?.id, mainGate._id);
   expectEqual('log records the gate\'s direction', latest[0]?.direction, 'entry');
 
-  // A person card at a vehicle gate must not open the barrier.
-  const wrongGate = await tap(gateKey(parkingKey), { rfid_uid: 'A1B2C3D4' });
+  // A vehicle TAG at a PERSON gate must not register attendance. (Previously
+  // this checked a person card at a vehicle gate, but single-card access
+  // deliberately repurposes that path — an owner's person card at a vehicle
+  // gate now resolves their vehicle instead of failing wrong_gate_type. The
+  // wrong_gate_type guard itself is untouched by that feature, so this
+  // direction — a vehicle tag presented at a person gate — still exercises
+  // it, and the identity-leak assertion moves here with it.
+  const wrongGate = await tap(gateKey(secondKey), { rfid_uid: 'E5F6A7B8' });
   expectEqual(
-    'person card denied at a vehicle gate',
+    'vehicle tag denied at a person gate',
     (wrongGate.json.data as { access_result?: string } | undefined)?.access_result,
     'denied'
   );
@@ -641,6 +647,131 @@ async function main(): Promise<void> {
   const sideKey = (sideMint.json.data as { key?: string } | undefined)?.key;
   expectEqual('side gate key minted', typeof sideKey, 'string');
 
+  console.log('\n== single-card access: owner card at a vehicle gate ==');
+
+  // Ana owns exactly ONE active vehicle (NCST-5678), so her ID card must
+  // resolve that vehicle at the parking barrier.
+  {
+    const r = await tap(gateKey(parkingKey), { rfid_uid: 'D4E5F6A7' });
+    expectEqual(
+      'owner card grants at vehicle gate',
+      (r.json.data as { access_result?: string } | undefined)?.access_result,
+      'granted'
+    );
+    expectEqual(
+      'owner card reason is null',
+      (r.json.data as { reason?: string | null } | undefined)?.reason,
+      null
+    );
+    const p = (r.json.data as { person?: Record<string, unknown> } | undefined)?.person;
+    expectEqual('owner card carries identity', !!p, true);
+    expectEqual('owner card shows owner name', p?.full_name, 'Ana Villanueva');
+    expectEqual('owner card shows plate', p?.plate_number, 'NCST-5678');
+    expectEqual('owner card shows owner type', p?.owner_type, 'staff');
+    expectEqual('owner card shows department', p?.department_section, 'Registrar Office');
+    // registered[] is a person-lane field and must never appear on this lane.
+    expectEqual('owner card withholds registered[]', p?.registered, undefined);
+    // Release so later checks start from a clean roster.
+    if (!parkingOutKey) throw new Error('parking exit key minting did not return a key');
+    await tap(gateKey(parkingOutKey), { rfid_uid: 'D4E5F6A7' });
+  }
+
+  // Maria owns no vehicle. The card is CORRECT for this gate — she simply has
+  // no pass — so the reason must not be wrong_gate_type.
+  {
+    const r = await tap(gateKey(parkingKey), { rfid_uid: 'B2C3D4E5' });
+    expectEqual(
+      'no vehicle denies',
+      (r.json.data as { access_result?: string } | undefined)?.access_result,
+      'denied'
+    );
+    expectEqual(
+      'no vehicle reason',
+      (r.json.data as { reason?: string } | undefined)?.reason,
+      'no_vehicle_registered'
+    );
+  }
+
+  // Juan owns TWO active vehicles. Nothing in the tap says which he is
+  // driving, so the barrier refuses to guess rather than logging a plate it
+  // did not verify.
+  {
+    const r = await tap(gateKey(parkingKey), { rfid_uid: 'A1B2C3D4' });
+    expectEqual(
+      'ambiguous owner denies',
+      (r.json.data as { access_result?: string } | undefined)?.access_result,
+      'denied'
+    );
+    expectEqual(
+      'ambiguous owner reason',
+      (r.json.data as { reason?: string } | undefined)?.reason,
+      'multiple_vehicles'
+    );
+  }
+
+  // A vehicle TAG at a vehicle gate is unchanged by this feature.
+  {
+    const r = await tap(gateKey(parkingKey), { rfid_uid: 'F6A7B8C9' });
+    expectEqual(
+      'vehicle tag still grants',
+      (r.json.data as { access_result?: string } | undefined)?.access_result,
+      'granted'
+    );
+    expectEqual(
+      'vehicle tag shows plate',
+      (r.json.data as { person?: { plate_number?: string } } | undefined)?.person?.plate_number,
+      'NCST-5678'
+    );
+    if (!parkingOutKey) throw new Error('parking exit key minting did not return a key');
+    await tap(gateKey(parkingOutKey), { rfid_uid: 'F6A7B8C9' });
+  }
+
+  // A person card at a PERSON gate is unchanged by this feature.
+  {
+    const r = await tap(gateKey(secondKey), { rfid_uid: 'B2C3D4E5' });
+    expectEqual(
+      'person card still grants at person gate',
+      (r.json.data as { access_result?: string } | undefined)?.access_result,
+      'granted'
+    );
+    expectEqual(
+      'person lane still returns type person',
+      (r.json.data as { person?: { type?: string } } | undefined)?.person?.type,
+      'student'
+    );
+    await tap(gateKey(sideKey ?? ''), { rfid_uid: 'B2C3D4E5' });
+  }
+
+  // An inactive person at a vehicle gate denies on IDENTITY, not on vehicle
+  // count. Pedro owns no vehicle, so if the status check were ordered after
+  // the vehicle lookup this would wrongly report no_vehicle_registered.
+  {
+    const pedro = await findPersonByIdNumber(superadmin, '2025-0003');
+    await request(superadmin, 'PATCH', `/persons/${pedro._id}/status`, { status: 'inactive' });
+    try {
+      const r = await tap(gateKey(parkingKey), { rfid_uid: 'C3D4E5F6' });
+      expectEqual(
+        'inactive person at vehicle gate denies',
+        (r.json.data as { access_result?: string } | undefined)?.access_result,
+        'denied'
+      );
+      expectEqual(
+        'inactive person reason',
+        (r.json.data as { reason?: string } | undefined)?.reason,
+        'inactive_id'
+      );
+      // Identity is still shown so a guard can tell "deactivated student"
+      // from "unregistered stranger" — the existing rule, re-pinned here.
+      expectEqual(
+        'inactive person identity shown',
+        (r.json.data as { person?: { full_name?: string } } | undefined)?.person?.full_name,
+        'Pedro Reyes'
+      );
+    } finally {
+      await request(superadmin, 'PATCH', `/persons/${pedro._id}/status`, { status: 'active' });
+    }
+  }
+
   const exitTap = await tap(gateKey(sideKey ?? ''), { rfid_uid: 'A1B2C3D4' });
   expectEqual(
     'exit gate grants',
@@ -736,10 +867,13 @@ async function main(): Promise<void> {
   }
 
   // wrong_gate_type still reveals nothing at all — existing behaviour, re-pinned
-  // because this task adds fields that could regress it.
-  const wrongGateTap = await tap(gateKey(parkingKey), { rfid_uid: 'A1B2C3D4' });
+  // because this task adds fields that could regress it. Uses a vehicle tag at
+  // a person gate, not a person card at a vehicle gate: single-card access
+  // repurposes the latter path (see the "vehicle tag denied at a person gate"
+  // check above), so it no longer produces wrong_gate_type at all.
+  const wrongGateTap = await tap(gateKey(secondKey), { rfid_uid: 'E5F6A7B8' });
   const wrongData = wrongGateTap.json.data as { reason?: string; person?: unknown };
-  expectEqual('a person card at a vehicle gate is wrong_gate_type', wrongData?.reason, 'wrong_gate_type');
+  expectEqual('a vehicle tag at a person gate is wrong_gate_type', wrongData?.reason, 'wrong_gate_type');
   expectEqual('wrong_gate_type reveals no identity at all', wrongData?.person, undefined);
 
   // An expired pass must not appear in its owner's registered list — showing it

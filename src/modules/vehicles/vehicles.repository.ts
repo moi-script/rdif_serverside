@@ -33,7 +33,13 @@ export const vehicleRepo = {
       status: 'active',
       valid_until: { $gte: asOf },
     })
-      .select('vehicle_type make')
+      // Projection is shared by two consumers: the monitor's `registered[]`
+      // list (vehicle_type + make) and the single-card gate path, which also
+      // needs _id for the occupancy write and plate_number for the scan log.
+      // `_id` is included by default. Keep this ONE method — a second lookup
+      // with a drifting filter is how a vehicle gets granted by one caller
+      // and rejected by another.
+      .select('vehicle_type make plate_number')
       .sort({ createdAt: -1 })
       .lean(),
 };
