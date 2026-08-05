@@ -9,11 +9,14 @@
     "seed": "ts-node src/config/seed.ts",
     "seed:test": "ts-node src/config/testSeed.ts",
     "rebuild:occupancy": "ts-node src/config/rebuildOccupancy.ts",
+    "migrate:vehicle-types": "ts-node src/config/migrateVehicleTypes.ts",
     "grant:superadmin": "ts-node src/config/grantSuperadmin.ts",
     "verify:roles": "ts-node src/config/verifyRoles.ts",
     "verify:gates": "ts-node src/config/verifyGates.ts",
     "verify:signatures": "ts-node src/config/verifySignatures.ts",
     "verify:passback": "ts-node src/config/verifyPassback.ts",
+    "verify:vehicles": "ts-node src/config/verifyVehicles.ts",
+    "verify:gadgets": "ts-node src/config/verifyGadgets.ts",
     "lint": "eslint src --ext .ts"
   },
   "dependencies": {

@@ -8,6 +8,7 @@ import { Actor, assertCanWrite, assertCanActOn } from '../../utils/authority';
 import { userRepo } from '../users/users.repository';
 import { blockedCardRepo } from '../blockedCards/blockedCards.repository';
 import { VehicleModel } from '../vehicles/vehicles.model';
+import { GadgetModel } from '../gadgets/gadgets.model';
 // The REPOSITORY, not vehicles.service — vehicles.service.ts already imports
 // from the persons side (personRepo), so importing the service here would
 // create an import cycle.
@@ -269,6 +270,17 @@ export const personService = {
     if (!person) throw new ApiError('NOT_FOUND', 'Person not found');
 
     await VehicleModel.updateMany({ owner_person_id: person._id }, { $set: { status: 'inactive' } });
+    // Gadgets cascade the same way, and like vehicles they are NOT reactivated
+    // by restore() — a restored person comes back inactive and their
+    // registrations are re-armed deliberately, not as a side effect.
+    //
+    // This is not a gate-safety measure: a deleted person cannot tap at all
+    // (personRepo.findByRfid is deleted-filtered), so their laptop could never
+    // have been displayed anyway. It is a consistency one. Without it the OSS
+    // console lists an active laptop registration belonging to somebody the
+    // directory says is gone, and it still counts against an allowance that
+    // nobody can see.
+    await GadgetModel.updateMany({ owner_person_id: person._id }, { $set: { status: 'inactive' } });
 
     const retiredUid = person.rfid_uid;
     // Block BEFORE the person record releases the UID (reverse of

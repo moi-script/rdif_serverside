@@ -6,12 +6,14 @@ import { UserModel } from '../modules/users/users.model';
 import { PersonModel, IPerson } from '../modules/persons/persons.model';
 import { GateModel } from '../modules/gates/gates.model';
 import { VehicleModel } from '../modules/vehicles/vehicles.model';
+import { GadgetModel } from '../modules/gadgets/gadgets.model';
 import { AttendanceModel } from '../modules/attendance/attendance.model';
 import { ScanLogModel } from '../modules/scan/scan.model';
 import { PersonPhotoModel } from '../modules/persons/personPhotos.model';
 import { GateKeyModel } from '../modules/gates/gateKeys.model';
 import { ROLES } from '../constants/roles';
 import { nextSchoolYearEnd } from '../utils/schoolYear';
+import { VehicleType } from '../constants/vehicleTypes';
 
 /**
  * Hardcoded test accounts + demo activity for the testing phase.
@@ -173,12 +175,12 @@ async function seedDemoActivity(persons: IPerson[]): Promise<void> {
     id_number: string;
     plate: string;
     rfid: string;
-    type: 'motorcycle' | 'car' | 'tricycle' | 'other';
+    type: VehicleType;
     make: string;
     model: string;
   }[] = [
     { id_number: '2025-0001', plate: 'NCST-1234', rfid: 'E5F6A7B8', type: 'motorcycle', make: 'Honda', model: 'Click 125i' },
-    { id_number: 'EMP-1001', plate: 'NCST-5678', rfid: 'F6A7B8C9', type: 'car', make: 'Toyota', model: 'Vios' },
+    { id_number: 'EMP-1001', plate: 'NCST-5678', rfid: 'F6A7B8C9', type: 'pickup', make: 'Toyota', model: 'Vios' },
   ];
   const vehicleDocs: { rfid: string; ownerId: Types.ObjectId }[] = [];
   for (const v of vehicleOwners) {
@@ -199,6 +201,31 @@ async function seedDemoActivity(persons: IPerson[]): Promise<void> {
       console.log(`[test-seed] created vehicle '${v.plate}' for ${owner.full_name}`);
     }
     vehicleDocs.push({ rfid: v.rfid, ownerId: vehicle._id });
+  }
+
+  // One registered laptop, idempotent by serial_number (unique) the way
+  // vehicles are idempotent by plate_number.
+  //
+  // ONE row, not two: the allowance is one active laptop per person, so a
+  // second seeded row would have to belong to a second owner and would only
+  // re-assert what verifyGadgets' limit check already covers. The serial is
+  // stored uppercase because that is what normalizeSerial produces — seeding a
+  // lowercase one would put a row in the database that the API itself could
+  // never have written.
+  const laptopOwner = persons.find((p) => p.id_number === '2025-0001');
+  if (laptopOwner) {
+    const serial = '5CD1234ABC';
+    const existingGadget = await GadgetModel.findOne({ serial_number: serial });
+    if (!existingGadget) {
+      await GadgetModel.create({
+        owner_person_id: laptopOwner._id,
+        gadget_type: 'laptop',
+        brand_model: 'Dell Latitude 5420',
+        serial_number: serial,
+        status: 'active',
+      });
+      console.log(`[test-seed] created laptop '${serial}' for ${laptopOwner.full_name}`);
+    }
   }
 
   // Attendance + scan history. Re-run with SEED_RESET=1 to wipe and regenerate.

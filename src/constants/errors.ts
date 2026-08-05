@@ -10,6 +10,7 @@ export const ERROR_CODES = {
   DUPLICATE_RFID: { status: 409, message: 'RFID UID already registered' },
   DUPLICATE_ID: { status: 409, message: 'ID number already registered' },
   DUPLICATE_PLATE: { status: 409, message: 'Plate number already registered' },
+  DUPLICATE_SERIAL: { status: 409, message: 'Serial number already registered' },
   DUPLICATE_USERNAME: { status: 409, message: 'Username already taken' },
   CONFLICT: { status: 409, message: 'Request conflicts with existing state' },
   CARD_BLOCKED: { status: 409, message: 'This card has been permanently blocked and cannot be reused' },

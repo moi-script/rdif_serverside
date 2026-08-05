@@ -4,6 +4,7 @@ import { ScanLogModel } from './scan.model';
 import { attendanceRepo } from '../attendance/attendance.repository';
 import { personRepo } from '../persons/persons.repository';
 import { vehicleRepo } from '../vehicles/vehicles.repository';
+import { gadgetRepo } from '../gadgets/gadgets.repository';
 import { gateRepo } from '../gates/gates.repository';
 import { blockedCardRepo } from '../blockedCards/blockedCards.repository';
 import { ApiError } from '../../utils/ApiError';
@@ -28,9 +29,15 @@ interface TapResult {
     owner_type?: string;
     department_section: string | null;
     photo_url?: string;
+    /** The VEHICLE's photo. `photo_url` above stays the owner's face — the
+     *  terminal shows both side by side on a vehicle gate. */
+    vehicle_photo_url?: string;
     plate_number?: string;
     vehicle?: { vehicle_type: string; make?: string };
     registered?: { vehicle_type: string; make?: string }[];
+    /** The cardholder's registered devices, for the exit ownership check. Shown
+     *  to the guard; never consulted by any access decision. */
+    gadgets?: { gadget_type: string; brand_model: string; serial_number: string }[];
   };
 }
 
@@ -109,11 +116,14 @@ export const scanService = {
               access_result = 'denied';
               reason = 'no_vehicle_registered';
             } else if (owned.length > 1) {
-              // Registration enforces one active vehicle per owner, so this
-              // is a safety net for rows that predate that rule. Refusing to
-              // guess is the point: granting here would log a plate nobody
-              // verified into the scan log, the occupancy roster and the
-              // anomaly report.
+              // Expected, not exceptional. A person may now hold several
+              // active vehicles (see constants/vehicleTypes VEHICLE_LIMITS),
+              // so their CARD cannot say which one they are driving. The
+              // vehicle's own RFID sticker can, and is the intended lane —
+              // this denial tells the guard to use it. Refusing to guess is
+              // the point: granting here would log a plate nobody verified
+              // into the scan log, the occupancy roster and the anomaly
+              // report.
               access_result = 'denied';
               reason = 'multiple_vehicles';
             } else {
@@ -131,6 +141,7 @@ export const scanService = {
                 photo_url: person.photo_url,
                 plate_number: v.plate_number,
                 vehicle: { vehicle_type: v.vehicle_type, make: v.make },
+                vehicle_photo_url: v.photo_url,
               };
             }
           }
@@ -179,8 +190,14 @@ export const scanService = {
             type: 'vehicle',
             owner_type: owner?.type,
             department_section: owner?.department_section ?? null,
+            // The owner's FACE. This was missing: the owner-card path above
+            // has always sent it and this one never did, so a sticker tap
+            // showed a name with no face — and the sticker is now the primary
+            // lane for anyone with more than one vehicle.
+            photo_url: owner?.photo_url,
             plate_number: vehicle.plate_number,
             vehicle: { vehicle_type: vehicle.vehicle_type, make: vehicle.make },
+            vehicle_photo_url: vehicle.photo_url,
           };
         }
       }
@@ -188,8 +205,9 @@ export const scanService = {
 
     // A gate has a fixed type now, so a person card must not open the parking
     // barrier and a vehicle tag must not register attendance at a walking gate.
-    // Gadgets (Subsystem B) are deliberately exempt when they are added: the
-    // check applies only to person and vehicle entities.
+    // Gadgets are not a third case here and never will be: they are identified
+    // through their owner's card and never become an entity_type, so this check
+    // still applies only to person and vehicle. See the gadget block below.
     if (access_result === 'granted' && entity_type !== gate.type) {
       access_result = 'denied';
       reason = 'wrong_gate_type';
@@ -288,6 +306,37 @@ export const scanService = {
     if (access_result === 'granted' && entity_type === 'person' && entity_id && personView) {
       const owned = await vehicleRepo.findActiveByOwner(entity_id, scan_time);
       personView.registered = owned.map((v) => ({ vehicle_type: v.vehicle_type, make: v.make }));
+      // Registered devices, for the exit ownership check: the guard compares
+      // the serial on this screen against the laptop in the person's hands.
+      //
+      // This is the ENTIRE gate-side footprint of the gadget registry, and it
+      // lives inside this block rather than anywhere else for four reasons,
+      // each of which is a property the placement guarantees rather than a rule
+      // something else has to enforce:
+      //
+      //   1. It cannot deny. access_result and reason are already final by the
+      //      time this runs, and nothing above reads `gadgets`. There is no
+      //      path from a laptop registration to a refused tap — which is the
+      //      whole design: the check answers "is this device yours", never "may
+      //      you leave". Those are different questions and the second is
+      //      already answered, independently, by the person's own card.
+      //   2. It is withheld on every denial, by the same `granted` condition
+      //      that withholds `registered` above — see that comment. A denied tap
+      //      is the case most likely to involve someone holding a card that is
+      //      not theirs, and handing that person a list of the cardholder's
+      //      laptop serials inverts the point of the feature entirely.
+      //   3. Vehicle gates are unaffected. The single-card owner path sets
+      //      entity_type = 'vehicle' before this point, so the condition does
+      //      not hold there. The parking barrier does not prompt for a laptop.
+      //   4. A gadget never becomes an entity_type, so the wrong_gate_type
+      //      guard, anti-passback, ScanLog and AttendanceSummary are all
+      //      untouched. This adds no reason codes.
+      const devices = await gadgetRepo.findActiveByOwner(entity_id);
+      personView.gadgets = devices.map((g) => ({
+        gadget_type: g.gadget_type,
+        brand_model: g.brand_model,
+        serial_number: g.serial_number,
+      }));
     }
 
     await scanRepo.createLog({
