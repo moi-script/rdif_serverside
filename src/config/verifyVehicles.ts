@@ -288,6 +288,99 @@ async function main(): Promise<void> {
     // Keep vehicleUidForTap referenced so an unused-variable lint stays quiet
     // and the first van's UID is visible in the log on a failing run.
     console.log(`  (first van UID was ${vehicleUidForTap})`);
+
+    console.log('\n== list: owner join, search, and deactivation ==');
+
+    // A vehicle of a type with room to spare, so this block never collides
+    // with the limit assertions above. pickup's limit is 3.
+    const listPlate = `VLIST-${suffix}`;
+    const listUid = nextUid();
+    const listRes = await request(superadmin, 'POST', '/vehicles', {
+      owner_person_id: ownerId,
+      plate_number: listPlate,
+      rfid_uid: listUid,
+      vehicle_type: 'pickup',
+      make: 'Toyota',
+    });
+    expectEqual('list fixture created', listRes.status, CREATED);
+    const listId = idOf(listRes.json);
+
+    // 1. The owner arrives joined, not as a bare id.
+    const listed = await request(superadmin, 'GET', `/vehicles?search=${listPlate}`);
+    expectEqual('list responds 200', listed.status, OK);
+    const listRows = (listed.json.data ?? []) as Array<{
+      plate_number?: string;
+      owner_person_id?: { full_name?: string } | string;
+    }>;
+    expectEqual('search by plate returns exactly one row', listRows.length, 1);
+    const joinedOwner = listRows[0]?.owner_person_id;
+    expectEqual(
+      'owner is populated, not a bare id',
+      typeof joinedOwner === 'object' && typeof joinedOwner?.full_name === 'string',
+      true
+    );
+    expectEqual(
+      'populated owner is the right person',
+      typeof joinedOwner === 'object' ? joinedOwner?.full_name : null,
+      'Vehicle-Limit Owner'
+    );
+
+    // 2. Search matches the sticker UID too.
+    const byUid = await request(superadmin, 'GET', `/vehicles?search=${listUid}`);
+    const uidRows = (byUid.json.data ?? []) as Array<{ plate_number?: string }>;
+    expectEqual('search by rfid_uid finds the vehicle', uidRows[0]?.plate_number, listPlate);
+
+    // 3. Regex metacharacters are escaped, not executed. Unescaped, the open
+    //    paren reaches the driver as an unterminated group and 500s.
+    const meta = await request(superadmin, 'GET', '/vehicles?search=' + encodeURIComponent('CAV (88'));
+    expectEqual('regex metacharacters do not error', meta.status, OK);
+
+    // 4. Deactivating frees the owner's slot for that type. Fill pickup to its
+    //    limit, confirm the next one is refused, deactivate one, confirm it is
+    //    then accepted.
+    const pickupsToAdd = VEHICLE_LIMITS.pickup - 1; // the fixture above is one
+    for (let i = 0; i < pickupsToAdd; i++) {
+      const r = await request(superadmin, 'POST', '/vehicles', {
+        owner_person_id: ownerId,
+        plate_number: `VFILL${i}-${suffix}`,
+        rfid_uid: nextUid(),
+        vehicle_type: 'pickup',
+      });
+      expectEqual(`pickup filler ${i + 1} accepted`, r.status, CREATED);
+    }
+
+    const overLimit = await request(superadmin, 'POST', '/vehicles', {
+      owner_person_id: ownerId,
+      plate_number: `VOVER-${suffix}`,
+      rfid_uid: nextUid(),
+      vehicle_type: 'pickup',
+    });
+    expectEqual('pickup past the limit is refused', overLimit.status, CONFLICT);
+
+    const deact = await request(superadmin, 'PATCH', `/vehicles/${listId}/status`, {
+      status: 'inactive',
+    });
+    expectEqual('deactivate responds 200', deact.status, OK);
+
+    const afterFree = await request(superadmin, 'POST', '/vehicles', {
+      owner_person_id: ownerId,
+      plate_number: `VFREE-${suffix}`,
+      rfid_uid: nextUid(),
+      vehicle_type: 'pickup',
+    });
+    expectEqual('deactivating freed the slot', afterFree.status, CREATED);
+
+    // 5. Reactivating past the limit is refused, and says so in words the UI
+    //    can show verbatim.
+    const react = await request(superadmin, 'PATCH', `/vehicles/${listId}/status`, {
+      status: 'active',
+    });
+    expectEqual('reactivating past the limit is refused', react.status, CONFLICT);
+    expectEqual(
+      'the refusal names the limit',
+      String(react.json.message ?? '').includes('the limit'),
+      true
+    );
   } finally {
     // Soft-deletes the person and cascades every owned vehicle to inactive.
     const del = await request(superadmin, 'DELETE', `/persons/${ownerId}`);
