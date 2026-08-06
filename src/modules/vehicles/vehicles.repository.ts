@@ -6,7 +6,16 @@ export const vehicleRepo = {
   create: (data: Partial<IVehicle>) => VehicleModel.create(data),
   async findPaginated(filter: FilterQuery<IVehicle>, p: PaginationParams) {
     const [items, total] = await Promise.all([
-      VehicleModel.find(filter).sort({ createdAt: -1 }).skip(p.skip).limit(p.limit).lean(),
+      VehicleModel.find(filter)
+        // The list view shows who owns each vehicle; without this the browser
+        // gets a bare ObjectId and would need a second round trip per page.
+        // findActiveByOwner deliberately does NOT get this join — it feeds the
+        // gate terminal, which needs the narrow projection it already has.
+        .populate('owner_person_id', 'full_name id_number type')
+        .sort({ createdAt: -1 })
+        .skip(p.skip)
+        .limit(p.limit)
+        .lean(),
       VehicleModel.countDocuments(filter),
     ]);
     return { items, total };

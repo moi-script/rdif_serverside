@@ -8,12 +8,14 @@ import { nextSchoolYearEnd } from '../../utils/schoolYear';
 import { blockedCardRepo } from '../blockedCards/blockedCards.repository';
 import { personRepo } from '../persons/persons.repository';
 import { VEHICLE_LIMITS, VehicleType, pluralizeType } from '../../constants/vehicleTypes';
+import { escapeRegex } from '../../utils/escapeRegex';
 
 interface ListQuery {
   page?: string;
   limit?: string;
   status?: string;
   vehicle_type?: string;
+  search?: string;
 }
 
 /** The shape findActiveByOwner projects. Not the full IVehicle. */
@@ -63,6 +65,14 @@ export const vehicleService = {
     const filter: FilterQuery<IVehicle> = {};
     if (query.status) filter.status = query.status;
     if (query.vehicle_type) filter.vehicle_type = query.vehicle_type;
+    if (query.search) {
+      // Plate and sticker UID only. Owner name is not searchable here: it would
+      // need a $lookup pipeline, and the directory already answers "what does
+      // this person drive" from the person's side. These two are what a clerk
+      // standing next to the vehicle actually has in hand.
+      const rx = { $regex: escapeRegex(query.search), $options: 'i' };
+      filter.$or = [{ plate_number: rx }, { rfid_uid: rx }];
+    }
     const { items, total } = await vehicleRepo.findPaginated(filter, p);
     return { items, meta: buildMeta(total, p.page, p.limit) };
   },
