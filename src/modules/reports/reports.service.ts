@@ -66,15 +66,38 @@ export const reportService = {
 
   /**
    * Every scan the passback system considers abnormal: refused repeat entries,
-   * exits with no matching entry, occupancy writes that failed on exit, and
-   * superadmin overrides. Capped at 500 rows — unlike the older reports here,
-   * this one is bounded on purpose.
+   * exits with no matching entry, occupancy writes that failed on exit,
+   * superadmin overrides, and exits the gate opened on a LAPSED registration.
+   * Capped at 500 rows — unlike the older reports here, this one is bounded on
+   * purpose.
    */
   async anomalies(query: AnomalyQuery) {
     const match: Record<string, unknown> = {
-      reason: {
-        $in: ['already_inside', 'exit_without_entry', 'manual_override', 'occupancy_unavailable'],
-      },
+      $or: [
+        {
+          reason: {
+            $in: ['already_inside', 'exit_without_entry', 'manual_override', 'occupancy_unavailable'],
+          },
+        },
+        {
+          // The lapsed-egress override in scan.service.tap: a deactivated or
+          // expired pass whose EXIT was granted anyway, because a stuck exit
+          // gate is a safety problem and a refused exit strands the occupancy
+          // row (see the long comment there). The barrier opened for a
+          // registration that was refused, which is exactly what an auditor
+          // needs to see.
+          //
+          // `access_result: 'granted'` is load-bearing, not decoration. These
+          // four reasons are the ordinary vocabulary of DENIED taps — every
+          // refused inactive card at every gate carries one — and matching on
+          // reason alone would bury the handful of real anomalies under every
+          // routine denial in the window, past the 500-row cap.
+          access_result: 'granted',
+          reason: {
+            $in: ['inactive_id', 'vehicle_expired', 'no_vehicle_registered', 'multiple_vehicles'],
+          },
+        },
+      ],
     };
     if (query.from || query.to) {
       // Local-day boundaries, exclusive `to` — same defect and fix as

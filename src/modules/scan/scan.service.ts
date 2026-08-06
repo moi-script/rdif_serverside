@@ -73,6 +73,16 @@ export const scanService = {
     // — a sticker identifies a car, a card identifies a person, and only the
     // latter is evidence that the human was present.
     let companionPersonId: Types.ObjectId | null = null;
+    // True when this tap was refused because the holder's REGISTRATION has
+    // lapsed — deactivated, expired, or resolving to no single vehicle — at a
+    // gate the card otherwise belongs at. It is set only in those branches,
+    // never inferred from `reason` afterwards, because the deciding fact is one
+    // only those branches hold: that the card is at the right barrier. A
+    // vehicle tag refused with `vehicle_expired` at a WALKING gate carries the
+    // same reason code and must not be overridden into an exit there.
+    //
+    // Drives the egress override below. Never consulted on entry.
+    let lapsedAtOwnGate = false;
 
     // A blocked card is refused before we look up what it used to be. It is
     // checked first because a blocked UID must never resolve to an identity:
@@ -110,11 +120,13 @@ export const scanService = {
             // for it would send a guard after the wrong thing.
             access_result = 'denied';
             reason = 'inactive_id';
+            lapsedAtOwnGate = true;
           } else {
             const owned = await vehicleRepo.findActiveByOwner(person._id, scan_time);
             if (owned.length === 0) {
               access_result = 'denied';
               reason = 'no_vehicle_registered';
+              lapsedAtOwnGate = true;
             } else if (owned.length > 1) {
               // Expected, not exceptional. A person may now hold several
               // active vehicles (see constants/vehicleTypes VEHICLE_LIMITS),
@@ -126,6 +138,7 @@ export const scanService = {
               // report.
               access_result = 'denied';
               reason = 'multiple_vehicles';
+              lapsedAtOwnGate = true;
             } else {
               const v = owned[0];
               entity_type = 'vehicle';
@@ -154,6 +167,7 @@ export const scanService = {
           } else {
             access_result = 'denied';
             reason = 'inactive_id';
+            lapsedAtOwnGate = true;
           }
         }
       } else {
@@ -164,6 +178,10 @@ export const scanService = {
           if (vehicle.status !== 'active') {
             access_result = 'denied';
             reason = 'inactive_id';
+            // Only at a vehicle gate. A sticker tapped at a walking gate is a
+            // wrong_gate_type tap wearing a lapse's reason code, and must stay
+            // denied in both directions.
+            lapsedAtOwnGate = gate.type === 'vehicle';
           } else if (!vehicle.valid_until || vehicle.valid_until.getTime() < scan_time.getTime()) {
             // Expiry is stored as end-of-day local (see nextSchoolYearEnd), so a
             // pass valid until 2027-03-31 works for all of that day.
@@ -180,6 +198,7 @@ export const scanService = {
             // this function while still logging the denial.
             access_result = 'denied';
             reason = 'vehicle_expired';
+            lapsedAtOwnGate = gate.type === 'vehicle';
           } else {
             access_result = 'granted';
             reason = null;
@@ -212,6 +231,41 @@ export const scanService = {
       access_result = 'denied';
       reason = 'wrong_gate_type';
       personView = undefined;
+    }
+
+    // Egress is never blocked by a lapsed registration.
+    //
+    // A pass can lapse — deactivated by a clerk, or valid_until simply passing
+    // — while the holder is standing INSIDE the campus. Refusing their ENTRY
+    // after that is the point of the feature. Refusing their EXIT is a
+    // different thing entirely, and it was trapping them: occupancy only ever
+    // moves on a granted tap, so a refused exit leaves the row `inside` for the
+    // rest of the occupancy window, and every tap after the pass is restored
+    // comes back `already_inside` with no way to resolve it at the gate. That
+    // is the defect this block closes — observed on 2026-08-06, where a car
+    // admitted at 03:07, deactivated, then reactivated could not get back in.
+    //
+    // The tap is GRANTED but keeps its reason, so nothing is hidden: the guard
+    // sees "ID inactive" on the terminal, the scan log records why the barrier
+    // opened, and reports.anomalies surfaces the row. This is the same
+    // granted-with-a-reason shape that `exit_without_entry` and
+    // `occupancy_unavailable` already use.
+    //
+    // Placed AFTER the wrong_gate_type guard so a card at the wrong barrier
+    // cannot be overridden into an exit there, and BEFORE the anti-passback
+    // block so the override actually releases the occupancy row — releasing it
+    // is the entire purpose. `lapsedAtOwnGate` is set only where the card is
+    // known to belong at this gate; see its declaration.
+    //
+    // Deliberately NOT extended to `card_blocked` or `unregistered_uid`: a
+    // blocked card is refused before identity is resolved because it may be in
+    // the wrong hands, and an unregistered UID has no occupancy row to free, so
+    // neither can be trapped by this mechanism in the first place.
+    let lapsedEgress = false;
+    if (input.direction === 'exit' && access_result === 'denied' && lapsedAtOwnGate && entity_id) {
+      access_result = 'granted';
+      lapsedEgress = true;
+      // `reason` is deliberately left as-is.
     }
 
     // Anti-passback. Runs only on taps that are otherwise granted, so a denied
@@ -273,7 +327,12 @@ export const scanService = {
           reason = 'occupancy_unavailable';
           outcome = 'released';
         }
-        if (outcome === 'exit_without_entry') {
+        if (outcome === 'exit_without_entry' && reason === null) {
+          // Only when nothing more specific was recorded. On a lapsed egress
+          // the reason is already the lapse — the fact the guard needs, and the
+          // fact that explains why the barrier opened at all. Overwriting it
+          // here would report a card that left on a revoked pass as an ordinary
+          // missed tap-in, which is the milder of the two anomalies.
           reason = 'exit_without_entry';
         }
         if (companionPersonId) {
@@ -303,7 +362,19 @@ export const scanService = {
     // Placed after wrong_gate_type (which clears personView entirely) and after
     // the anti-passback block, so it can never resurrect identity on a denial
     // that deliberately withheld it, nor attach on an already_inside denial.
-    if (access_result === 'granted' && entity_type === 'person' && entity_id && personView) {
+    // `!lapsedEgress` keeps the withholding rule intact. That override turns a
+    // denial into a grant so the barrier opens, but the tap is still a refused
+    // registration, and a deactivated ID is precisely the case most likely to
+    // involve a card in the wrong hands — the reason this data is withheld on
+    // denials at all. Testing `access_result` alone would hand exactly that
+    // person the cardholder's vehicle and laptop-serial list.
+    if (
+      access_result === 'granted' &&
+      !lapsedEgress &&
+      entity_type === 'person' &&
+      entity_id &&
+      personView
+    ) {
       const owned = await vehicleRepo.findActiveByOwner(entity_id, scan_time);
       personView.registered = owned.map((v) => ({ vehicle_type: v.vehicle_type, make: v.make }));
       // Registered devices, for the exit ownership check: the guard compares
@@ -364,6 +435,10 @@ export const scanService = {
           isLate(scan_time) ? 'late' : 'present'
         );
       } else {
+        // A lapsed egress reaches here as a grant, and should: the person did
+        // leave, and the time-out is the truthful record of it. Only the exit
+        // side is reachable that way — the override never fires on entry — so a
+        // revoked ID can still never mark itself present.
         await attendanceRepo.upsertTimeOut(String(attendancePersonId), key, scan_time);
       }
     }
