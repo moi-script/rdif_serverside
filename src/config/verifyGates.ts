@@ -6,17 +6,19 @@
  * Run with: npm run verify:gates
  */
 import { detectImageType } from '../utils/imageType';
-// Imported BEFORE installVerifyBypass, not just alongside it: db.ts pulls in
-// config/env.ts, whose top-level dotenv.config() call is what actually
-// populates process.env.VERIFY_BYPASS_TOKEN from .env. verifyBypass.ts reads
-// that var from process.env at ITS OWN module-evaluation time (a one-shot
-// top-level const, not a lazy read), so if this import came after
-// installVerifyBypass's, the token would still be unset when the bypass
-// module captured it and every request in this file would run under the
-// real rate limits regardless of .env. verifyRoles.ts already relies on this
-// same ordering (there, an earlier middlewares/rateLimiter import pulls in
-// env.ts first) — this makes verifyGates.ts do it explicitly rather than by
-// accident of some other import's side effect.
+// HISTORICAL NOTE, no longer load-bearing: this import used to need to come
+// BEFORE installVerifyBypass(), because db.ts pulls in config/env.ts, whose
+// top-level dotenv.config() call populates process.env.VERIFY_BYPASS_TOKEN
+// from .env, and verifyBypass.ts used to read that var from process.env at
+// ITS OWN module-evaluation time (a one-shot top-level const, not a lazy
+// read) — so importing it out of this order would silently leave the token
+// unset and run this file under the real rate limits regardless of .env.
+// installVerifyBypass() now reads process.env.VERIFY_BYPASS_TOKEN lazily,
+// inside the function, at call time — so the token is picked up correctly
+// however these imports are ordered. The order below is kept as-is (and this
+// note kept, rather than deleted) because it records the real defect this
+// file once had; a future "organize imports" pass can no longer reintroduce
+// it.
 import { connectDB, disconnectDB } from './db';
 import { installVerifyBypass } from './verifyBypass';
 import { VehicleModel } from '../modules/vehicles/vehicles.model';
@@ -654,7 +656,7 @@ async function runChecks(): Promise<void> {
     'granted'
   );
 
-  console.log('\n== registration guards: one active vehicle + cross-collection UID ==');
+  console.log('\n== registration guards: per-type limits + cross-collection UID ==');
 
   // A person may hold multiple vehicle ROWS but only one ACTIVE at a time:
   // under single-card the owner is the key, so a second active pass has no
@@ -670,10 +672,10 @@ async function runChecks(): Promise<void> {
       id_number: `verify-gates-sc-guard-${stamp}`,
       department_section: 'BSIT 4-A',
     });
-    expectEqual('one-active-vehicle guard throwaway owner created', ownerRes.status, 201);
+    expectEqual('per-type-limit guard throwaway owner created', ownerRes.status, 201);
     const ownerData = ownerRes.json.data as { _id?: string; id?: string } | undefined;
     const ownerId = String(ownerData?._id ?? ownerData?.id ?? '');
-    expectEqual('one-active-vehicle guard throwaway owner has an id', ownerId.length > 0, true);
+    expectEqual('per-type-limit guard throwaway owner has an id', ownerId.length > 0, true);
 
     try {
       const first = await request(superadmin, 'POST', '/vehicles', {
@@ -685,14 +687,18 @@ async function runChecks(): Promise<void> {
       });
       expectEqual('first active vehicle accepted', first.status, 201);
 
+      // Same TYPE as the first, deliberately. The guard is per-type now
+      // (VEHICLE_LIMITS in constants/vehicleTypes.ts), and motorcycle's limit
+      // is 1 — a second vehicle of a DIFFERENT type would legitimately be
+      // accepted and would make this assertion test nothing.
       const second = await request(superadmin, 'POST', '/vehicles', {
         owner_person_id: ownerId,
         plate_number: `SC-TEST-2-${suffix}`,
         rfid_uid: 'FEED' + suffix,
-        vehicle_type: 'car',
-        make: 'Toyota',
+        vehicle_type: 'motorcycle',
+        make: 'Yamaha',
       });
-      expectEqual('second active vehicle rejected', second.status, 409);
+      expectEqual('second active vehicle of the same type rejected', second.status, 409);
     } finally {
       // The only "delete" this API offers for a Person; it soft-deletes and
       // cascades every owned vehicle to inactive (VehicleModel.updateMany in
@@ -700,7 +706,7 @@ async function runChecks(): Promise<void> {
       // the SC-TEST vehicle row itself is not removable over HTTP — cleaned
       // up out-of-band via mongosh as part of this task's verification.
       const del = await request(superadmin, 'DELETE', `/persons/${ownerId}`);
-      expectEqual('one-active-vehicle guard throwaway owner cleaned up', del.status, 200);
+      expectEqual('per-type-limit guard throwaway owner cleaned up', del.status, 200);
     }
   }
 
@@ -729,7 +735,7 @@ async function runChecks(): Promise<void> {
         owner_person_id: ownerId,
         plate_number: `SC-TEST-3-${suffix}`,
         rfid_uid: 'D4E5F6A7',
-        vehicle_type: 'car',
+        vehicle_type: 'pickup',
         make: 'Toyota',
       });
       expectEqual("person's UID rejected for a vehicle", r.status, 409);
@@ -751,6 +757,86 @@ async function runChecks(): Promise<void> {
       rfid_uid: 'F6A7B8C9',
     });
     expectEqual("vehicle's UID rejected for a person", r.status, 409);
+  }
+
+  // vehicleService.update's one-active guard (Finding 1's fix lives in this
+  // exact method) had zero assertions anywhere in this suite. PATCHing a
+  // second, currently-inactive vehicle to status 'active' for an owner who
+  // is already at that type's limit must be refused with 409, same as create.
+  {
+    const stamp = Date.now();
+    const suffix = (stamp % 0xffff).toString(16).toUpperCase().padStart(4, '0');
+    const ownerRes = await request(superadmin, 'POST', '/persons', {
+      full_name: 'Update-Guard Owner',
+      type: 'student',
+      id_number: `verify-gates-upd-guard-${stamp}`,
+      department_section: 'BSIT 4-A',
+    });
+    expectEqual('update-guard throwaway owner created', ownerRes.status, 201);
+    const ownerData = ownerRes.json.data as { _id?: string; id?: string } | undefined;
+    const ownerId = String(ownerData?._id ?? ownerData?.id ?? '');
+    expectEqual('update-guard throwaway owner has an id', ownerId.length > 0, true);
+
+    try {
+      const activeVehicle = await request(superadmin, 'POST', '/vehicles', {
+        owner_person_id: ownerId,
+        plate_number: `SC-TEST-4-${suffix}`,
+        rfid_uid: 'FEEE' + suffix,
+        vehicle_type: 'motorcycle',
+        make: 'Honda',
+      });
+      expectEqual('update-guard first active vehicle accepted', activeVehicle.status, 201);
+
+      // Same TYPE as the active one above, for the same reason as the create
+      // guard: motorcycle's limit is 1, so ACTIVATING this one must be
+      // refused. A pickup here would activate legitimately and the assertion
+      // below would be testing nothing.
+      const inactiveVehicle = await request(superadmin, 'POST', '/vehicles', {
+        owner_person_id: ownerId,
+        plate_number: `SC-TEST-5-${suffix}`,
+        rfid_uid: 'FDDD' + suffix,
+        vehicle_type: 'motorcycle',
+        make: 'Yamaha',
+        status: 'inactive',
+      });
+      expectEqual('update-guard second (inactive) vehicle accepted', inactiveVehicle.status, 201);
+      const inactiveId = (inactiveVehicle.json.data as { _id?: string } | undefined)?._id ?? '';
+      expectEqual('update-guard second vehicle has an id', inactiveId.length > 0, true);
+
+      const activation = await request(superadmin, 'PATCH', `/vehicles/${inactiveId}`, {
+        status: 'active',
+      });
+      expectEqual('PATCHing a second vehicle active is rejected', activation.status, 409);
+    } finally {
+      const del = await request(superadmin, 'DELETE', `/persons/${ownerId}`);
+      expectEqual('update-guard throwaway owner cleaned up', del.status, 200);
+    }
+  }
+
+  // personService.reassignRfid's cross-collection check had no assertion:
+  // reassigning a person's card to a UID that belongs to a VEHICLE must be
+  // refused with 409. F6A7B8C9 is Ana's seeded vehicle tag.
+  {
+    const stamp = Date.now();
+    const personRes = await request(superadmin, 'POST', '/persons', {
+      full_name: 'Reassign-Guard Person',
+      type: 'student',
+      id_number: `verify-gates-reassign-guard-${stamp}`,
+      department_section: 'BSIT 4-A',
+      rfid_uid: 'FCCC' + (stamp % 0xffff).toString(16).toUpperCase().padStart(4, '0'),
+    });
+    expectEqual('reassign-guard throwaway person created', personRes.status, 201);
+    const personData = personRes.json.data as { _id?: string; id?: string } | undefined;
+    const guardPersonId = String(personData?._id ?? personData?.id ?? '');
+    expectEqual('reassign-guard throwaway person has an id', guardPersonId.length > 0, true);
+
+    const reassign = await request(superadmin, 'PATCH', `/persons/${guardPersonId}/rfid`, {
+      rfid_uid: 'F6A7B8C9',
+    });
+    expectEqual("reassigning a person's card to a vehicle's UID is rejected", reassign.status, 409);
+
+    const del = await request(superadmin, 'DELETE', `/persons/${guardPersonId}`);
+    expectEqual('reassign-guard throwaway person cleaned up', del.status, 200);
   }
 
   // An exit gate must close the attendance day the entry gate opened.
@@ -787,6 +873,22 @@ async function runChecks(): Promise<void> {
     // Release so later checks start from a clean roster.
     if (!parkingOutKey) throw new Error('parking exit key minting did not return a key');
     await tap(gateKey(parkingOutKey), { rfid_uid: 'D4E5F6A7' });
+
+    // THE OWNER-CARD EXIT HALF. The drive-in above only pins time_in — the
+    // release tap just issued also runs the companion release + upsertTimeOut
+    // (scan.service.tap's vehicle-gate exit path), and that half had no
+    // assertion anywhere in this suite. Query the same way the time_in check
+    // elsewhere in this file does.
+    const anaForExit = await findPersonByIdNumber(superadmin, 'EMP-1001');
+    const todayForExit = localDateKey(new Date());
+    const anaAttAfterExit = await request(
+      superadmin,
+      'GET',
+      `/attendance?person_id=${anaForExit._id}&from=${todayForExit}&to=${todayForExit}&limit=5`
+    );
+    const anaExitRows = (anaAttAfterExit.json.data ?? []) as { time_out?: string | null }[];
+    expectEqual('an attendance row exists for the owner after driving out', anaExitRows.length >= 1, true);
+    expectEqual('owner-card drive-out at the parking exit wrote a time_out', !!anaExitRows[0]?.time_out, true);
   }
 
   // Maria owns no vehicle. The card is CORRECT for this gate — she simply has
@@ -803,23 +905,73 @@ async function runChecks(): Promise<void> {
       (r.json.data as { reason?: string } | undefined)?.reason,
       'no_vehicle_registered'
     );
+    // THE PRIVACY RULE, re-pinned on this denial: registered[] is a
+    // person-lane field and must never leak on a denial either.
+    expectEqual(
+      'no_vehicle_registered denial withholds registered[]',
+      (r.json.data as { person?: { registered?: unknown } } | undefined)?.person?.registered,
+      undefined
+    );
   }
 
-  // Juan owns TWO active vehicles. Nothing in the tap says which he is
-  // driving, so the barrier refuses to guess rather than logging a plate it
-  // did not verify.
+  // An owner with TWO active vehicles: nothing in an owner-CARD tap says
+  // which he is driving, so the barrier refuses to guess rather than logging
+  // a plate it did not verify. (The vehicle's own sticker is the lane that
+  // resolves this — see the vehicle TAG check below.)
+  //
+  // The second vehicle is CREATED and torn down here rather than assumed.
+  // This block used to rely on the seeded owner happening to hold a leftover
+  // second vehicle from earlier manual testing — ambient database litter,
+  // which made the assertion pass or fail depending on what a previous run or
+  // a human had left behind. Worse, that leftover was a second MOTORCYCLE,
+  // which put the seeded owner permanently over the motorcycle limit of 1 and
+  // made the expiry block's restore PATCH (further up) fail with 409, leaving
+  // the seeded fixture stranded expired for every later run.
+  //
+  // It is a pickup, not a motorcycle: the owner already holds the seeded
+  // motorcycle NCST-1234, and motorcycle's limit is 1.
   {
-    const r = await tap(gateKey(parkingKey), { rfid_uid: 'A1B2C3D4' });
-    expectEqual(
-      'ambiguous owner denies',
-      (r.json.data as { access_result?: string } | undefined)?.access_result,
-      'denied'
-    );
-    expectEqual(
-      'ambiguous owner reason',
-      (r.json.data as { reason?: string } | undefined)?.reason,
-      'multiple_vehicles'
-    );
+    const ambiguityStamp = Date.now();
+    const ambiguitySuffix = (ambiguityStamp % 0xffff).toString(16).toUpperCase().padStart(4, '0');
+    const juan = await findPersonByIdNumber(superadmin, '2025-0001');
+    const extra = await request(superadmin, 'POST', '/vehicles', {
+      owner_person_id: juan._id,
+      plate_number: `SC-TEST-AMB-${ambiguitySuffix}`, // prefix: PROBE_VEHICLE_PLATE_PREFIXES
+      rfid_uid: 'FAB' + ambiguitySuffix,
+      vehicle_type: 'pickup',
+      make: 'Toyota',
+    });
+    expectEqual('second active vehicle for the seeded owner created', extra.status, 201);
+    const extraId = (extra.json.data as { _id?: string } | undefined)?._id ?? '';
+
+    try {
+      const r = await tap(gateKey(parkingKey), { rfid_uid: 'A1B2C3D4' });
+      expectEqual(
+        'ambiguous owner denies',
+        (r.json.data as { access_result?: string } | undefined)?.access_result,
+        'denied'
+      );
+      expectEqual(
+        'ambiguous owner reason',
+        (r.json.data as { reason?: string } | undefined)?.reason,
+        'multiple_vehicles'
+      );
+      // THE PRIVACY RULE, re-pinned on this denial too.
+      expectEqual(
+        'multiple_vehicles denial withholds registered[]',
+        (r.json.data as { person?: { registered?: unknown } } | undefined)?.person?.registered,
+        undefined
+      );
+    } finally {
+      // Deactivated, not deleted: this API has no vehicle DELETE, and leaving
+      // it active would re-create exactly the ambient-litter problem this
+      // block was rewritten to escape — every later assertion that taps the
+      // seeded owner's card would then hit multiple_vehicles.
+      const cleanup = await request(superadmin, 'PATCH', `/vehicles/${extraId}/status`, {
+        status: 'inactive',
+      });
+      expectEqual('ambiguity probe vehicle deactivated', cleanup.status, 200);
+    }
   }
 
   // A vehicle TAG at a vehicle gate is unchanged by this feature.
@@ -1109,12 +1261,12 @@ async function runChecks(): Promise<void> {
   const keepValidUntil = ownedVeh.valid_until;
 
   // Count BEFORE, and assert the count DROPS BY ONE — do not assert it becomes
-  // empty. The seeded owner currently holds TWO active vehicles (NCST-1234 plus
-  // a leftover from vehicle-registration testing), so "expect 0" would fail for
-  // a reason that has nothing to do with expiry. Counting the delta is also
-  // robust to whatever the fixture holds later, and `registered` entries carry
-  // only vehicle_type and make — deliberately no plate — so a specific vehicle
-  // cannot be identified from the list anyway.
+  // empty. How many active vehicles the seeded owner holds depends on what
+  // else is in the database, so "expect 0" would fail for reasons that have
+  // nothing to do with expiry. Counting the delta is robust to whatever the
+  // fixture holds, and `registered` entries carry only vehicle_type and make
+  // — deliberately no plate — so a specific vehicle cannot be identified from
+  // the list anyway.
   const beforeTap = await tap(gateKey(secondKey), { rfid_uid: 'A1B2C3D4' });
   const beforeCount = (((beforeTap.json.data as { person?: { registered?: unknown[] } })?.person
     ?.registered) ?? []).length;
@@ -1171,7 +1323,7 @@ async function runChecks(): Promise<void> {
  * unable to touch a seeded fixture: seeded plates are 'NCST-' (never
  * 'SC-TEST'), and seeded id_numbers are '2025-000n' / 'EMP-100n' (never
  * 'verify-gates-'). 'verify-gates-' alone covers every throwaway person this
- * file creates (the one-active-vehicle guard's owner, and the cross-UID
+ * file creates (the per-type-limit guard's owner, and the cross-UID
  * guard's owner) — the third guard check (vehicle's UID rejected for a
  * person) is a rejected POST /persons and creates no row to sweep.
  */

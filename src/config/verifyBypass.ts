@@ -12,14 +12,6 @@
  * regardless of what any client sends.
  */
 
-// Read directly from process.env, the same way every harness file already
-// does (see the matching VERIFY_BYPASS_TOKEN const in verifyRoles.ts,
-// verifyGates.ts, verifySignatures.ts, verifyPassback.ts), rather than
-// pulling in config/env.ts here — that module's zod schema requires
-// MONGODB_URI/JWT secrets/etc to be set, which this module has no business
-// demanding just to decide whether to add one header.
-const VERIFY_BYPASS_TOKEN = process.env.VERIFY_BYPASS_TOKEN;
-
 let installed = false;
 
 export function installVerifyBypass(): void {
@@ -27,6 +19,22 @@ export function installVerifyBypass(): void {
   // so this can run more than once per process. Only the first call may wrap.
   if (installed) return;
   installed = true;
+
+  // Read directly from process.env, the same way every harness file already
+  // does (see the matching VERIFY_BYPASS_TOKEN reads in verifyRoles.ts,
+  // verifyGates.ts, verifySignatures.ts, verifyPassback.ts), rather than
+  // pulling in config/env.ts here — that module's zod schema requires
+  // MONGODB_URI/JWT secrets/etc to be set, which this module has no business
+  // demanding just to decide whether to add one header.
+  //
+  // Read HERE, inside the function, at call time — not as a module-level
+  // const captured at import time. A top-level const made this bypass
+  // depend on import order: it only worked if this module was imported
+  // AFTER something that had already run dotenv.config() (db.ts -> env.ts).
+  // That was previously papered over by ordering imports in verifyGates.ts
+  // and verifyRoles.ts; a lazy read here makes the ordering irrelevant since
+  // installVerifyBypass() is always called well after process startup.
+  const VERIFY_BYPASS_TOKEN = process.env.VERIFY_BYPASS_TOKEN;
 
   // No token, no change: leave globalThis.fetch completely untouched so a run
   // without VERIFY_BYPASS_TOKEN set behaves exactly as it did before this

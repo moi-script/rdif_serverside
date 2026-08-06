@@ -1,4 +1,5 @@
 import { Schema, model, Document, Types } from 'mongoose';
+import { VEHICLE_TYPES, VehicleType } from '../../constants/vehicleTypes';
 
 export interface IVehicleApplication extends Document {
   _id: Types.ObjectId;
@@ -6,7 +7,7 @@ export interface IVehicleApplication extends Document {
   // Classification
   category: 'new' | 'renewal';
   applicant_type: 'student' | 'employee';
-  vehicle_type: 'motorcycle' | 'car' | 'tricycle' | 'other';
+  vehicle_type: VehicleType;
 
   // Links
   owner_person_id: Types.ObjectId; // ref Person, required
@@ -65,7 +66,7 @@ const vehicleApplicationSchema = new Schema<IVehicleApplication>(
     applicant_type: { type: String, enum: ['student', 'employee'], required: true },
     vehicle_type: {
       type: String,
-      enum: ['motorcycle', 'car', 'tricycle', 'other'],
+      enum: [...VEHICLE_TYPES],
       required: true,
     },
 

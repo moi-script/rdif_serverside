@@ -39,7 +39,11 @@ export const vehicleRepo = {
       // `_id` is included by default. Keep this ONE method — a second lookup
       // with a drifting filter is how a vehicle gets granted by one caller
       // and rejected by another.
-      .select('vehicle_type make plate_number')
+      // photo_url joins the projection for the gate terminal's vehicle frame.
+      // Without it the single-card grant path in scan.service reads
+      // `v.photo_url` as undefined and the terminal shows a placeholder for a
+      // vehicle that does have a photo.
+      .select('vehicle_type make plate_number photo_url')
       .sort({ createdAt: -1 })
       .lean(),
 };

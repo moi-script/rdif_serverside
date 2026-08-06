@@ -1,11 +1,12 @@
 import { Schema, model, Document, Types } from 'mongoose';
+import { VEHICLE_TYPES, VehicleType } from '../../constants/vehicleTypes';
 
 export interface IVehicle extends Document {
   _id: Types.ObjectId;
   owner_person_id: Types.ObjectId;
   plate_number: string;
   rfid_uid: string;
-  vehicle_type: 'motorcycle' | 'car' | 'tricycle' | 'other';
+  vehicle_type: VehicleType;
   make?: string;
   vehicle_model?: string;
   color?: string;
@@ -26,7 +27,9 @@ const vehicleSchema = new Schema<IVehicle>(
     rfid_uid: { type: String, required: true, unique: true },
     vehicle_type: {
       type: String,
-      enum: ['motorcycle', 'car', 'tricycle', 'other'],
+      // Spread to a mutable array: `as const` gives a readonly tuple, which
+      // Mongoose's enum option does not accept.
+      enum: [...VEHICLE_TYPES],
       required: true,
     },
     make: { type: String },
