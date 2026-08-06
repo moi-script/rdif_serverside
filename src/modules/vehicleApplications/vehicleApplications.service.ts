@@ -6,9 +6,10 @@ import { getPagination, buildMeta } from '../../utils/pagination';
 import { Actor, assertCanWrite } from '../../utils/authority';
 import { nextSchoolYearEnd } from '../../utils/schoolYear';
 import { personRepo } from '../persons/persons.repository';
-import { vehicleService } from '../vehicles/vehicles.service';
+import { vehicleService, assertWithinLimit } from '../vehicles/vehicles.service';
 import { vehicleRepo } from '../vehicles/vehicles.repository';
 import { blockedCardRepo } from '../blockedCards/blockedCards.repository';
+import { VehicleType } from '../../constants/vehicleTypes';
 
 interface ListQuery {
   page?: string;
@@ -23,7 +24,7 @@ interface ListQuery {
 export interface CreateApplicationInput {
   category: 'new' | 'renewal';
   applicant_type: 'student' | 'employee';
-  vehicle_type: 'motorcycle' | 'car' | 'tricycle' | 'other';
+  vehicle_type: VehicleType;
   owner_person_id: string;
   id_number: string;
   last_name: string;
@@ -115,6 +116,20 @@ export const vehicleApplicationService = {
     // duplicate vehicle from ever being created.
     const existingRfid = await vehicleRepo.findByRfid(input.rfid_uid);
     if (existingRfid) throw new ApiError('DUPLICATE_RFID');
+    // Pre-checked here for the same reason as DUPLICATE_RFID above: without
+    // it, the application writes first and only the vehicle insert fails,
+    // leaving an orphan application that is immutable by design.
+    const personWithRfid = await personRepo.findByRfid(input.rfid_uid);
+    if (personWithRfid) {
+      throw new ApiError('DUPLICATE_RFID', 'That RFID is already assigned to a person');
+    }
+    // Pre-checked here for the same reason as DUPLICATE_RFID above: the write
+    // order below is application-then-vehicle and applications are immutable,
+    // so a limit breach discovered at the vehicle insert would leave an orphan
+    // application nobody can edit or delete. Identical wording to the check
+    // vehicleService.create runs, so a clerk sees one message, not two.
+    const activeForOwner = await vehicleRepo.findActiveByOwner(owner._id, new Date());
+    assertWithinLimit(activeForOwner, input.vehicle_type, owner.full_name);
     // Pre-checked here too, not just in vehicleService.create below: without
     // this, a blocked UID would write the application first (paperwork
     // survives) and only fail on the vehicle insert, leaving the same kind of

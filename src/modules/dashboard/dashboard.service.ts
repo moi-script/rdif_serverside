@@ -1,6 +1,7 @@
 import { Types } from 'mongoose';
 import { PersonModel } from '../persons/persons.model';
 import { VehicleModel } from '../vehicles/vehicles.model';
+import { GadgetModel } from '../gadgets/gadgets.model';
 import { ScanLogModel } from '../scan/scan.model';
 import { GateModel } from '../gates/gates.model';
 import { AttendanceModel } from '../attendance/attendance.model';
@@ -91,10 +92,13 @@ export const dashboardService = {
     if (actor.role === ROLES.SUPERADMIN) {
       return this.adminView();
     }
-    if (actor.role === ROLES.REGISTRAR || actor.role === ROLES.HR || actor.role === ROLES.OSS) {
-      // hr and oss get the same registration-focused summary as registrar:
-      // no scan or gate data, consistent with Subsystem A's ruling. Without
-      // an explicit arm here they fell through to the unlinked/guard shape
+    if (actor.role === ROLES.OSS) {
+      return this.ossView();
+    }
+    if (actor.role === ROLES.REGISTRAR || actor.role === ROLES.HR) {
+      // hr gets the same registration-focused summary as registrar: no scan
+      // or gate data, consistent with Subsystem A's ruling. Without an
+      // explicit arm here they fell through to the unlinked/guard shape
       // below ({ gates }), which the frontend does not expect for an admin
       // role.
       return this.registrarView();
@@ -142,12 +146,37 @@ export const dashboardService = {
     };
   },
 
+  /**
+   * OSS is the vehicle office: RBAC v2 gives it a Parking tab, and
+   * ParkingView reads `parking_activity` unconditionally, so the
+   * registration-only shape crashed that tab. It gets the registrar summary
+   * plus vehicle-domain data it already owns through `registerVehicles` —
+   * and nothing more. Person scan logs (`recent_scans`) and gate status stay
+   * superadmin-only; OSS has no Overview or Presence tab and is still denied
+   * /logs, /scan/logs and /reports/*.
+   */
+  async ossView() {
+    const [registration, total_vehicles, total_gadgets, parking_activity] = await Promise.all([
+      this.registrarView(),
+      VehicleModel.countDocuments({}),
+      // OSS owns the gadget domain (WRITE_DOMAINS), so the count belongs on its
+      // dashboard for the same reason total_vehicles does. Deliberately not
+      // added to registrarView: the registrar has no gadget surface at all, and
+      // that view is defined by what it withholds.
+      GadgetModel.countDocuments({}),
+      parkingActivity(8),
+    ]);
+
+    return { ...registration, total_vehicles, total_gadgets, parking_activity };
+  },
+
   async adminView() {
     const today = startOfToday();
     const [
       total_persons,
       by_type,
       total_vehicles,
+      total_gadgets,
       scan_events_today,
       granted_today,
       denied_today,
@@ -162,6 +191,7 @@ export const dashboardService = {
         { $group: { _id: '$type', count: { $sum: 1 } } },
       ]),
       VehicleModel.countDocuments({}),
+      GadgetModel.countDocuments({}),
       ScanLogModel.countDocuments({ scan_time: { $gte: today } }),
       ScanLogModel.countDocuments({ scan_time: { $gte: today }, access_result: 'granted' }),
       ScanLogModel.countDocuments({ scan_time: { $gte: today }, access_result: 'denied' }),
@@ -181,6 +211,7 @@ export const dashboardService = {
       persons_by_type,
       active_today,
       total_vehicles,
+      total_gadgets,
       scan_events_today,
       granted_today,
       denied_today,

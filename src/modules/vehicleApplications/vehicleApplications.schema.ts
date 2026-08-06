@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { VEHICLE_TYPES } from '../../constants/vehicleTypes';
 
 // Required list mirrors the design spec exactly: the client's real paper form
 // left Email, Tel No, Driver's License No, LTO CR, and Relationship blank,
@@ -7,7 +8,9 @@ import { z } from 'zod';
 export const createApplicationSchema = z.object({
   category: z.enum(['new', 'renewal']),
   applicant_type: z.enum(['student', 'employee']),
-  vehicle_type: z.enum(['motorcycle', 'car', 'tricycle', 'other']),
+  // Spread and re-asserted for the same reason as vehicles.schema.ts: zod's
+  // enum needs a mutable [string, ...string[]] tuple, not a readonly one.
+  vehicle_type: z.enum([...VEHICLE_TYPES] as [string, ...string[]]),
   owner_person_id: z.string().min(1),
   id_number: z.string().min(1),
   last_name: z.string().min(1),

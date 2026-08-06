@@ -2,34 +2,33 @@ import { Request, Response } from 'express';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { sendSuccess } from '../../utils/ApiResponse';
 import { actorOf } from '../../utils/authority';
-import { vehicleService } from './vehicles.service';
-import { vehiclePhotoService } from './vehiclePhotos.service';
+import { gadgetService } from './gadgets.service';
+import { gadgetPhotoService } from './gadgetPhotos.service';
 
-export const vehicleController = {
+export const gadgetController = {
   list: asyncHandler(async (req: Request, res: Response) => {
-    const { items, meta } = await vehicleService.list(req.query);
+    const { items, meta } = await gadgetService.list(req.query);
     sendSuccess(res, items, 200, meta);
   }),
   get: asyncHandler(async (req: Request, res: Response) => {
-    sendSuccess(res, await vehicleService.get(req.params.id));
+    sendSuccess(res, await gadgetService.get(req.params.id));
   }),
   create: asyncHandler(async (req: Request, res: Response) => {
-    sendSuccess(res, await vehicleService.create(req.body, actorOf(req)), 201);
+    sendSuccess(res, await gadgetService.create(req.body, actorOf(req)), 201);
   }),
   update: asyncHandler(async (req: Request, res: Response) => {
-    sendSuccess(res, await vehicleService.update(req.params.id, req.body, actorOf(req)));
+    sendSuccess(res, await gadgetService.update(req.params.id, req.body, actorOf(req)));
   }),
   setStatus: asyncHandler(async (req: Request, res: Response) => {
-    sendSuccess(res, await vehicleService.setStatus(req.params.id, req.body.status, actorOf(req)));
+    sendSuccess(res, await gadgetService.setStatus(req.params.id, req.body.status, actorOf(req)));
   }),
 
   uploadPhoto: asyncHandler(async (req: Request, res: Response) => {
-    sendSuccess(res, await vehiclePhotoService.upload(req.params.id, actorOf(req), req.file), 201);
+    sendSuccess(res, await gadgetPhotoService.upload(req.params.id, actorOf(req), req.file), 201);
   }),
   getPhoto: asyncHandler(async (req: Request, res: Response) => {
-    const photo = await vehiclePhotoService.get(req.params.id);
+    const photo = await gadgetPhotoService.get(req.params.id);
     const etag = `W/"${photo.updatedAt.getTime()}-${photo.byte_size}"`;
-    // A gate terminal re-requests the same vehicles all day.
     if (req.headers['if-none-match'] === etag) {
       res.status(304).end();
       return;
@@ -41,6 +40,6 @@ export const vehicleController = {
     res.status(200).send(photo.data);
   }),
   deletePhoto: asyncHandler(async (req: Request, res: Response) => {
-    sendSuccess(res, await vehiclePhotoService.remove(req.params.id, actorOf(req)));
+    sendSuccess(res, await gadgetPhotoService.remove(req.params.id, actorOf(req)));
   }),
 };

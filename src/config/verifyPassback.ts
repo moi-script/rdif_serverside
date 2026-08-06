@@ -362,11 +362,16 @@ async function main(): Promise<void> {
   expectEqual('exit against a fresh inside row has no reason', freshExit.reason, null);
   await OccupancyModel.deleteMany({ entity_id: juan._id });
 
-  // A denied tap must not move anyone's state. Tapping a person card at a
-  // VEHICLE gate is denied for wrong_gate_type before occupancy is consulted;
-  // if it leaked through, the entry below would come back already_inside.
+  // A denied tap must not move anyone's state. Tapping Juan's person card at
+  // a VEHICLE gate is denied before occupancy is consulted — single-card
+  // access resolves his owner-card at the barrier, and since he owns TWO
+  // active vehicles (the seeded multiple_vehicles fixture) the barrier
+  // refuses to guess which one rather than granting; if it leaked through,
+  // the entry below would come back already_inside. (Prior to single-card
+  // access this denied for wrong_gate_type instead — the denial-does-not-
+  // move-state guarantee under test here is unchanged, only the reason is.)
   const wrongGate = await tap(superadmin, juanUid, vehicleEntry, 'entry');
-  expectEqual('person card at a vehicle gate denied', wrongGate.reason, 'wrong_gate_type');
+  expectEqual('person card at a vehicle gate denied', wrongGate.reason, 'multiple_vehicles');
   const afterWrongGate = await tap(superadmin, juanUid, personEntry, 'entry');
   expectEqual('a denied tap left state untouched', afterWrongGate.access_result, 'granted');
   await tap(superadmin, juanUid, personExit, 'exit');
@@ -395,6 +400,144 @@ async function main(): Promise<void> {
   }
 
   await OccupancyModel.deleteMany({ entity_id: juan._id });
+
+  console.log('\n== egress is never blocked by a lapsed registration ==');
+  // A registration can lapse (deactivated by a clerk, or valid_until passing)
+  // while the vehicle is standing INSIDE the campus. Entry denials are correct
+  // then — but an EXIT denial traps the row: occupancy only ever moves on a
+  // granted tap, so the vehicle stays 'inside' for the rest of the occupancy
+  // window and every tap after reactivation comes back already_inside, with no
+  // gate-side way to resolve it. That is the exact sequence observed in
+  // production on 2026-08-06 (scan_logs for owner card 0003461782).
+  //
+  // Uses a throwaway owner and vehicle so the deactivation cannot disturb the
+  // seeded fixtures the rest of this harness taps.
+  const lapseStamp = Date.now();
+  const lapseSuffix = (lapseStamp % 0xffff).toString(16).toUpperCase().padStart(4, '0');
+  const lapseOwnerRes = await request(superadmin, 'POST', '/persons', {
+    full_name: 'Lapsed-Pass Owner',
+    type: 'student',
+    id_number: `verify-lapse-${lapseStamp}`,
+    department_section: 'BSIT 4-A',
+    rfid_uid: `BBBB${lapseSuffix}`,
+  });
+  expectEqual('lapse setup: throwaway owner created', lapseOwnerRes.status, 201);
+  const lapseOwnerId = String(
+    (lapseOwnerRes.json.data as { _id?: string } | undefined)?._id ?? ''
+  );
+  const lapseCardUid = `BBBB${lapseSuffix}`;
+  const lapseTagUid = `BC01${lapseSuffix}`;
+
+  const lapseVehicleRes = await request(superadmin, 'POST', '/vehicles', {
+    owner_person_id: lapseOwnerId,
+    plate_number: `LAPSE-${lapseSuffix}`,
+    rfid_uid: lapseTagUid,
+    vehicle_type: 'motorcycle',
+    make: 'Toyota',
+  });
+  expectEqual('lapse setup: throwaway vehicle created', lapseVehicleRes.status, 201);
+  const lapseVehicleId = String(
+    (lapseVehicleRes.json.data as { _id?: string } | undefined)?._id ?? ''
+  );
+
+  try {
+    // --- the vehicle TAG lane ---
+    expectEqual(
+      'lapse setup: vehicle tag entry granted',
+      (await tap(superadmin, lapseTagUid, vehicleEntry, 'entry')).access_result,
+      'granted'
+    );
+
+    const deactivated = await request(superadmin, 'PATCH', `/vehicles/${lapseVehicleId}`, {
+      status: 'inactive',
+    });
+    expectEqual('lapse setup: vehicle deactivated', deactivated.status, 200);
+
+    // Entry must still be refused — the pass is genuinely revoked.
+    expectEqual(
+      'a deactivated vehicle is refused entry',
+      (await tap(superadmin, lapseTagUid, vehicleEntry, 'entry')).reason,
+      'inactive_id'
+    );
+
+    // ...but the car is already inside, and a stuck exit gate is a physical
+    // safety problem. Egress is granted and the occupancy row is released.
+    const lapsedExit = await tap(superadmin, lapseTagUid, vehicleExit, 'exit');
+    expectEqual('a deactivated vehicle is never trapped inside', lapsedExit.access_result, 'granted');
+    expectEqual(
+      'the lapsed exit still names why the pass was refused',
+      lapsedExit.reason,
+      'inactive_id'
+    );
+    const afterLapsedExit = await OccupancyModel.findOne({ entity_id: lapseVehicleId }).lean();
+    expectEqual('the lapsed exit released the occupancy row', afterLapsedExit?.state, 'outside');
+
+    // Reactivating must hand back a usable pass, not a permanent already_inside.
+    const reactivated = await request(superadmin, 'PATCH', `/vehicles/${lapseVehicleId}`, {
+      status: 'active',
+    });
+    expectEqual('lapse setup: vehicle reactivated', reactivated.status, 200);
+    expectEqual(
+      'entry after reactivation is granted, not already_inside',
+      (await tap(superadmin, lapseTagUid, vehicleEntry, 'entry')).access_result,
+      'granted'
+    );
+
+    // --- the owner-CARD lane, which denies for a different reason ---
+    // The car is inside from the tap above. Deactivate again: the owner's card
+    // now resolves to zero active vehicles, so this path denies with
+    // no_vehicle_registered rather than inactive_id — and trapped the car just
+    // the same before this fix.
+    await request(superadmin, 'PATCH', `/vehicles/${lapseVehicleId}`, { status: 'inactive' });
+    expectEqual(
+      'an owner card with no active vehicle is refused entry',
+      (await tap(superadmin, lapseCardUid, vehicleEntry, 'entry')).reason,
+      'no_vehicle_registered'
+    );
+    const cardExit = await tap(superadmin, lapseCardUid, vehicleExit, 'exit');
+    expectEqual(
+      'an owner card with no active vehicle is never trapped inside',
+      cardExit.access_result,
+      'granted'
+    );
+
+    // The vehicle it entered on cannot be resolved from the card any more, so
+    // the card releases the PERSON. The vehicle row is cleared by its own tag
+    // (above) or by the superadmin override; what must not happen is a refused
+    // exit.
+    //
+    // The reason is the LAPSE, not exit_without_entry: the person had no
+    // occupancy row here, and the milder anomaly must not overwrite the fact
+    // that explains why the barrier opened.
+    expectEqual(
+      'the card exit names why the pass was refused',
+      cardExit.reason,
+      'no_vehicle_registered'
+    );
+
+    // The override must not become a way through the WRONG barrier. This
+    // vehicle is inactive, so a sticker tap carries `inactive_id` at any gate —
+    // but at a walking gate that tap is a wrong-gate tap wearing a lapse's
+    // reason code, and stays denied in both directions.
+    const tagAtPersonGate = await tap(superadmin, lapseTagUid, personExit, 'exit');
+    expectEqual(
+      'a lapsed vehicle tag is still refused at a person gate',
+      tagAtPersonGate.access_result,
+      'denied'
+    );
+
+    // And entry is untouched by all of the above: the override is exit-only.
+    expectEqual(
+      'the override never applies to entry',
+      (await tap(superadmin, lapseTagUid, vehicleEntry, 'entry')).access_result,
+      'denied'
+    );
+  } finally {
+    await OccupancyModel.deleteMany({ entity_id: new Types.ObjectId(lapseVehicleId) });
+    await OccupancyModel.deleteMany({ entity_id: new Types.ObjectId(lapseOwnerId) });
+    await VehicleModel.deleteMany({ plate_number: `LAPSE-${lapseSuffix}` });
+    await PersonModel.deleteMany({ id_number: `verify-lapse-${lapseStamp}` });
+  }
 
   console.log('\n== presence roster and override ==');
   const registrar = await login('testregistrar', 'Registrar@123');

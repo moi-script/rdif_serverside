@@ -8,6 +8,11 @@ import { Actor, assertCanWrite, assertCanActOn } from '../../utils/authority';
 import { userRepo } from '../users/users.repository';
 import { blockedCardRepo } from '../blockedCards/blockedCards.repository';
 import { VehicleModel } from '../vehicles/vehicles.model';
+import { GadgetModel } from '../gadgets/gadgets.model';
+// The REPOSITORY, not vehicles.service — vehicles.service.ts already imports
+// from the persons side (personRepo), so importing the service here would
+// create an import cycle.
+import { vehicleRepo } from '../vehicles/vehicles.repository';
 
 interface ListQuery {
   page?: string;
@@ -104,6 +109,12 @@ export const personService = {
     if (data.rfid_uid) {
       const existing = await personRepo.findByRfid(data.rfid_uid);
       if (existing) throw new ApiError('DUPLICATE_RFID');
+      // The reverse of the check in vehicleService.create: a UID belongs to a
+      // person OR a vehicle, never both.
+      const vehicleWithRfid = await vehicleRepo.findByRfid(data.rfid_uid);
+      if (vehicleWithRfid) {
+        throw new ApiError('DUPLICATE_RFID', 'That RFID is already assigned to a vehicle');
+      }
       // A block enforced only at the barrier would be no block at all: a
       // retired UID could be re-registered here and would then resolve
       // normally at the gate. See scan.service.tap for the other half.
@@ -203,6 +214,10 @@ export const personService = {
     if (await blockedCardRepo.isBlocked(rfid_uid)) throw new ApiError('CARD_BLOCKED');
     const clash = await personRepo.findByRfid(rfid_uid);
     if (clash && String(clash._id) !== id) throw new ApiError('DUPLICATE_RFID');
+    const vehicleWithRfid = await vehicleRepo.findByRfid(rfid_uid);
+    if (vehicleWithRfid) {
+      throw new ApiError('DUPLICATE_RFID', 'That RFID is already assigned to a vehicle');
+    }
 
     const updated = await this.update(id, { rfid_uid }, actor);
     // Block AFTER the swap succeeds: blocking first would kill the old card
@@ -255,6 +270,17 @@ export const personService = {
     if (!person) throw new ApiError('NOT_FOUND', 'Person not found');
 
     await VehicleModel.updateMany({ owner_person_id: person._id }, { $set: { status: 'inactive' } });
+    // Gadgets cascade the same way, and like vehicles they are NOT reactivated
+    // by restore() — a restored person comes back inactive and their
+    // registrations are re-armed deliberately, not as a side effect.
+    //
+    // This is not a gate-safety measure: a deleted person cannot tap at all
+    // (personRepo.findByRfid is deleted-filtered), so their laptop could never
+    // have been displayed anyway. It is a consistency one. Without it the OSS
+    // console lists an active laptop registration belonging to somebody the
+    // directory says is gone, and it still counts against an allowance that
+    // nobody can see.
+    await GadgetModel.updateMany({ owner_person_id: person._id }, { $set: { status: 'inactive' } });
 
     const retiredUid = person.rfid_uid;
     // Block BEFORE the person record releases the UID (reverse of

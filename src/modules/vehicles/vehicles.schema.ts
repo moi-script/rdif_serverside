@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { VEHICLE_TYPES } from '../../constants/vehicleTypes';
 
 export const createVehicleSchema = z.object({
   owner_person_id: z.string().min(1),
@@ -9,7 +10,10 @@ export const createVehicleSchema = z.object({
   rfid_uid: z
     .string()
     .regex(/^[0-9A-Fa-f]{6,32}$/, 'rfid_uid must be 6-32 hex characters'),
-  vehicle_type: z.enum(['motorcycle', 'car', 'tricycle', 'other']),
+  // zod's enum needs a mutable [string, ...string[]] tuple, so the readonly
+  // const array is spread and re-asserted. This is the whole cost of having
+  // one list instead of two.
+  vehicle_type: z.enum([...VEHICLE_TYPES] as [string, ...string[]]),
   make: z.string().optional(),
   vehicle_model: z.string().optional(),
   color: z.string().optional(),

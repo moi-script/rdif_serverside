@@ -387,6 +387,9 @@ async function runChecks(): Promise<void> {
   expectEqual('hr may NOT write vehicles', denies(() => assertCanWrite(hrActor, 'vehicle')), true);
   expectEqual('oss may write vehicles', denies(() => assertCanWrite({ id: 'dddddddddddddddddddddddd', role: ROLES.OSS }, 'vehicle')), false);
   expectEqual('oss may NOT write persons', denies(() => assertCanWrite({ id: 'dddddddddddddddddddddddd', role: ROLES.OSS }, 'person:student')), true);
+  expectEqual('oss may write gadgets', denies(() => assertCanWrite({ id: 'dddddddddddddddddddddddd', role: ROLES.OSS }, 'gadget')), false);
+  expectEqual('hr may NOT write gadgets', denies(() => assertCanWrite(hrActor, 'gadget')), true);
+  expectEqual('registrar may NOT write gadgets', denies(() => assertCanWrite({ id: 'eeeeeeeeeeeeeeeeeeeeeeee', role: ROLES.REGISTRAR }, 'gadget')), true);
   expectEqual('superadmin may write every domain', denies(() => { assertCanWrite(superActor, 'person:student'); assertCanWrite(superActor, 'vehicle'); assertCanWrite(superActor, 'gadget'); }), false);
 
   // Fail-closed on an unrecognized role. `actor.role` is a JWT claim, never
@@ -479,11 +482,10 @@ async function runChecks(): Promise<void> {
     await check(`${name} GET /gates`, token, 'GET', '/gates', OK);
   }
 
-  console.log('\n== registrar/hr/oss dashboards are registration-only (no scan/gate/vehicle leak) ==');
+  console.log('\n== registrar/hr dashboards are registration-only (no scan/gate/vehicle leak) ==');
   for (const [name, token] of [
     ['registrar', registrar],
     ['hr', hr],
-    ['oss', oss],
   ] as const) {
     const roleDashboard = await request(token, 'GET', '/dashboard');
     expectEqual(`${name} dashboard responds 200`, roleDashboard.status, OK);
@@ -506,6 +508,40 @@ async function runChecks(): Promise<void> {
     expectEqual(
       `${name} dashboard has no gates key`,
       Object.prototype.hasOwnProperty.call(roleDashboardData, 'gates'),
+      false
+    );
+  }
+
+  console.log('\n== oss dashboard carries vehicle data but no person scan/gate data ==');
+  {
+    const ossDashboard = await request(oss, 'GET', '/dashboard');
+    expectEqual('oss dashboard responds 200', ossDashboard.status, OK);
+    const ossData = (ossDashboard.json.data ?? {}) as Record<string, unknown>;
+    expectEqual(
+      'oss dashboard carries registration data',
+      typeof ossData.total_persons === 'number',
+      true
+    );
+    // The Parking tab reads parking_activity unconditionally; a missing key
+    // crashes the tab rather than rendering it empty.
+    expectEqual(
+      'oss dashboard carries parking_activity as an array',
+      Array.isArray(ossData.parking_activity),
+      true
+    );
+    expectEqual(
+      'oss dashboard carries total_vehicles',
+      typeof ossData.total_vehicles === 'number',
+      true
+    );
+    expectEqual(
+      'oss dashboard has no recent_scans key',
+      Object.prototype.hasOwnProperty.call(ossData, 'recent_scans'),
+      false
+    );
+    expectEqual(
+      'oss dashboard has no gates key',
+      Object.prototype.hasOwnProperty.call(ossData, 'gates'),
       false
     );
   }
@@ -1559,17 +1595,60 @@ async function runChecks(): Promise<void> {
     make: 'Honda',
   });
   expectEqual('first vehicle for this owner', firstVehicle.status, CREATED);
+  const firstVehicleData = firstVehicle.json.data as { _id?: string; id?: string } | undefined;
+  const firstVehicleId = String(firstVehicleData?._id ?? firstVehicleData?.id ?? '');
+  expectEqual('first vehicle has an id', firstVehicleId.length > 0, true);
 
-  // The whole point of dropping the unique index. Before it, this is a
-  // duplicate-key error or the service's own "Owner already has a vehicle".
+  // A person may hold several ACTIVE vehicles now, bounded per type by
+  // VEHICLE_LIMITS (constants/vehicleTypes.ts). The first vehicle above is a
+  // motorcycle (limit 1) and this one is a pickup (limit 3), so no
+  // deactivation is needed — the allowances are independent, which is exactly
+  // what this asserts.
   const secondVehicle = await request(oss, 'POST', '/vehicles', {
     owner_person_id: multiOwnerId,
     plate_number: `RBAC-M2-${multiSuffix}`, // prefix: PROBE_VEHICLE_PLATE_PREFIXES
     rfid_uid: 'BEE2' + multiSuffix,
-    vehicle_type: 'car',
+    vehicle_type: 'pickup',
     make: 'Toyota',
   });
-  expectEqual('a SECOND vehicle for the same owner is allowed', secondVehicle.status, CREATED);
+  expectEqual(
+    'a second ACTIVE vehicle of a different type is allowed',
+    secondVehicle.status,
+    CREATED
+  );
+
+  // A second MOTORCYCLE, however, is over that type's limit of 1 — while the
+  // pickup allowance above is untouched. This is the check that would catch
+  // a limit lookup keyed on the wrong type, or one counting all types
+  // together.
+  const secondMotorcycle = await request(oss, 'POST', '/vehicles', {
+    owner_person_id: multiOwnerId,
+    plate_number: `RBAC-M3-${multiSuffix}`, // prefix: PROBE_VEHICLE_PLATE_PREFIXES
+    rfid_uid: 'BEE4' + multiSuffix,
+    vehicle_type: 'motorcycle',
+    make: 'Yamaha',
+  });
+  expectEqual('a second motorcycle exceeds that type limit', secondMotorcycle.status, CONFLICT);
+
+  // Deactivating frees the slot: the limit counts ACTIVE and unexpired rows
+  // only, never every row the person has ever held.
+  const deactivateFirstVehicle = await request(oss, 'PATCH', `/vehicles/${firstVehicleId}/status`, {
+    status: 'inactive',
+  });
+  expectEqual('first vehicle deactivated', deactivateFirstVehicle.status, OK);
+
+  const replacementMotorcycle = await request(oss, 'POST', '/vehicles', {
+    owner_person_id: multiOwnerId,
+    plate_number: `RBAC-M4-${multiSuffix}`, // prefix: PROBE_VEHICLE_PLATE_PREFIXES
+    rfid_uid: 'BEE5' + multiSuffix,
+    vehicle_type: 'motorcycle',
+    make: 'Suzuki',
+  });
+  expectEqual(
+    'deactivating frees the slot for another motorcycle',
+    replacementMotorcycle.status,
+    CREATED
+  );
 
   // valid_until is defaulted, not left empty.
   const secondBody = secondVehicle.json.data as { valid_until?: string } | undefined;
@@ -1580,7 +1659,7 @@ async function runChecks(): Promise<void> {
     owner_person_id: multiOwnerId,
     plate_number: `RBAC-M1-${multiSuffix}`,
     rfid_uid: 'BEE3' + multiSuffix,
-    vehicle_type: 'car',
+    vehicle_type: 'pickup',
     make: 'Nissan',
   });
   expectEqual('duplicate plate is still rejected', dupPlate.status, CONFLICT);
@@ -1594,7 +1673,7 @@ async function runChecks(): Promise<void> {
     owner_person_id: multiOwnerId,
     plate_number: `RBAC-M3-${multiSuffix}`, // prefix: PROBE_VEHICLE_PLATE_PREFIXES (rejected — never persisted)
     rfid_uid: 'A3F',
-    vehicle_type: 'car',
+    vehicle_type: 'pickup',
     make: 'Kia',
   });
   expectEqual('a too-short rfid_uid is rejected at vehicle registration', shortUidVehicle.status, 422);
@@ -1626,7 +1705,7 @@ async function runChecks(): Promise<void> {
     owner_person_id: i4OwnerId,
     plate_number: `RBAC-I4-${i4Suffix}`, // prefix: PROBE_VEHICLE_PLATE_PREFIXES
     rfid_uid: 'FED0' + i4Suffix,
-    vehicle_type: 'car',
+    vehicle_type: 'pickup',
     make: 'Toyota',
   });
   expectEqual('I4 probe vehicle created while owner is active', i4VehicleRes.status, CREATED);
@@ -1660,7 +1739,7 @@ async function runChecks(): Promise<void> {
     owner_person_id: i4OwnerId,
     plate_number: `RBAC-I4B-${i4Suffix}`, // prefix: PROBE_VEHICLE_PLATE_PREFIXES (rejected — never persisted)
     rfid_uid: 'FED1' + i4Suffix,
-    vehicle_type: 'car',
+    vehicle_type: 'pickup',
     make: 'Honda',
   });
   expectEqual('creating a vehicle for a deleted owner is refused', i4NewVehicle.status, 404);
@@ -1692,7 +1771,7 @@ async function runChecks(): Promise<void> {
     owner_person_id: i4bOwnerId,
     plate_number: `RBAC-I4C-${i4Suffix}`, // prefix: PROBE_VEHICLE_PLATE_PREFIXES
     rfid_uid: 'FEE2' + i4Suffix,
-    vehicle_type: 'car',
+    vehicle_type: 'pickup',
     make: 'Mazda',
   });
   expectEqual('I4b probe vehicle created, active, owned by the second owner', i4bVehicleRes.status, CREATED);
@@ -1717,12 +1796,19 @@ async function runChecks(): Promise<void> {
   // moved. Checking status alone would miss a bug where the write partially
   // applied (owner reassigned, status merely left alone by chance).
   const i4bAfter = await request(superadmin, 'GET', '/vehicles?limit=100');
-  const i4bRow = ((i4bAfter.json.data ?? []) as { _id: string; status: string; owner_person_id?: string }[])
-    .find((v) => v._id === i4bVehicleId);
+  // GET /vehicles populates owner_person_id (see vehicles.repository.ts), so
+  // it comes back as an object here, not a bare id string — unwrap _id.
+  const i4bRow = (
+    (i4bAfter.json.data ?? []) as { _id: string; status: string; owner_person_id?: { _id?: string } | string }[]
+  ).find((v) => v._id === i4bVehicleId);
   expectEqual('the refused reassignment left the vehicle active', i4bRow?.status, 'active');
+  const i4bRowOwnerId =
+    typeof i4bRow?.owner_person_id === 'object'
+      ? String(i4bRow.owner_person_id?._id ?? '')
+      : i4bRow?.owner_person_id;
   expectEqual(
     'the refused reassignment left the original owner in place',
-    i4bRow?.owner_person_id,
+    i4bRowOwnerId,
     i4bOwnerId
   );
 
@@ -1780,7 +1866,7 @@ async function runChecks(): Promise<void> {
     owner_person_id: c1OwnerId,
     plate_number: `RBAC-C1-${c1Suffix}`, // prefix: PROBE_VEHICLE_PLATE_PREFIXES
     rfid_uid: c1VehicleRfid,
-    vehicle_type: 'car',
+    vehicle_type: 'pickup',
     make: 'Toyota',
   });
   expectEqual('C1 probe vehicle created', c1VehicleRes.status, CREATED);
@@ -1907,11 +1993,30 @@ async function runChecks(): Promise<void> {
   const deleteAttempt = await request(oss, 'DELETE', `/vehicle-applications/${applicationId}`);
   expectEqual('applications cannot be deleted', [404, 405].includes(deleteAttempt.status), true);
 
+  // The first application's vehicle is still active and is also a pickup, so
+  // the minimal application below would be this owner's SECOND active pickup
+  // — within the limit of 3, but deactivating first keeps this check isolated
+  // to what it actually tests (schema defaults on a mostly-blank form) rather
+  // than depending on how much pickup allowance happens to be left.
+  const firstApplicationVehicleId = String(createdBody?.vehicle?._id ?? '');
+  expectEqual('first application vehicle has an id', firstApplicationVehicleId.length > 0, true);
+  const deactivateFirstApplicationVehicle = await request(
+    superadmin,
+    'PATCH',
+    `/vehicles/${firstApplicationVehicleId}/status`,
+    { status: 'inactive' }
+  );
+  expectEqual(
+    'first application vehicle deactivated to make room for the minimal application',
+    deactivateFirstApplicationVehicle.status,
+    OK
+  );
+
   // The client's real form left most fields blank. This must succeed.
   const minimal = await request(oss, 'POST', '/vehicle-applications', {
     category: 'new',
     applicant_type: 'student',
-    vehicle_type: 'car',
+    vehicle_type: 'pickup',
     owner_person_id: applicantId,
     id_number: `verify-rbac-app-${appStamp}`,
     last_name: 'Villareal',
@@ -2266,7 +2371,7 @@ async function runChecks(): Promise<void> {
   });
   await check('a blocked UID cannot be given to a vehicle', oss, 'POST', '/vehicles', 409, {
     owner_person_id: holderId, plate_number: `BLK-${blkSuffix}`,
-    rfid_uid: oldUid, vehicle_type: 'car', make: 'Toyota',
+    rfid_uid: oldUid, vehicle_type: 'pickup', make: 'Toyota',
   });
 
   // 4. A blocked tap must not move occupancy — it is a denial like any other.
@@ -2306,7 +2411,7 @@ async function runChecks(): Promise<void> {
     owner_person_id: victimId,
     plate_number: `RBAC-VIC-${vicSuffix}`,                // prefix: PROBE_VEHICLE_PLATE_PREFIXES
     rfid_uid: victimVehicleUid,
-    vehicle_type: 'car',
+    vehicle_type: 'pickup',
     make: 'Toyota',
   });
   expectEqual('cascade victim vehicle created', vicVeh.status, CREATED);

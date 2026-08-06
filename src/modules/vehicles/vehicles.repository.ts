@@ -6,7 +6,16 @@ export const vehicleRepo = {
   create: (data: Partial<IVehicle>) => VehicleModel.create(data),
   async findPaginated(filter: FilterQuery<IVehicle>, p: PaginationParams) {
     const [items, total] = await Promise.all([
-      VehicleModel.find(filter).sort({ createdAt: -1 }).skip(p.skip).limit(p.limit).lean(),
+      VehicleModel.find(filter)
+        // The list view shows who owns each vehicle; without this the browser
+        // gets a bare ObjectId and would need a second round trip per page.
+        // findActiveByOwner deliberately does NOT get this join — it feeds the
+        // gate terminal, which needs the narrow projection it already has.
+        .populate('owner_person_id', 'full_name id_number type')
+        .sort({ createdAt: -1 })
+        .skip(p.skip)
+        .limit(p.limit)
+        .lean(),
       VehicleModel.countDocuments(filter),
     ]);
     return { items, total };
@@ -33,7 +42,17 @@ export const vehicleRepo = {
       status: 'active',
       valid_until: { $gte: asOf },
     })
-      .select('vehicle_type make')
+      // Projection is shared by two consumers: the monitor's `registered[]`
+      // list (vehicle_type + make) and the single-card gate path, which also
+      // needs _id for the occupancy write and plate_number for the scan log.
+      // `_id` is included by default. Keep this ONE method — a second lookup
+      // with a drifting filter is how a vehicle gets granted by one caller
+      // and rejected by another.
+      // photo_url joins the projection for the gate terminal's vehicle frame.
+      // Without it the single-card grant path in scan.service reads
+      // `v.photo_url` as undefined and the terminal shows a placeholder for a
+      // vehicle that does have a photo.
+      .select('vehicle_type make plate_number photo_url')
       .sort({ createdAt: -1 })
       .lean(),
 };
