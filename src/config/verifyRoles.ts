@@ -1796,12 +1796,19 @@ async function runChecks(): Promise<void> {
   // moved. Checking status alone would miss a bug where the write partially
   // applied (owner reassigned, status merely left alone by chance).
   const i4bAfter = await request(superadmin, 'GET', '/vehicles?limit=100');
-  const i4bRow = ((i4bAfter.json.data ?? []) as { _id: string; status: string; owner_person_id?: string }[])
-    .find((v) => v._id === i4bVehicleId);
+  // GET /vehicles populates owner_person_id (see vehicles.repository.ts), so
+  // it comes back as an object here, not a bare id string — unwrap _id.
+  const i4bRow = (
+    (i4bAfter.json.data ?? []) as { _id: string; status: string; owner_person_id?: { _id?: string } | string }[]
+  ).find((v) => v._id === i4bVehicleId);
   expectEqual('the refused reassignment left the vehicle active', i4bRow?.status, 'active');
+  const i4bRowOwnerId =
+    typeof i4bRow?.owner_person_id === 'object'
+      ? String(i4bRow.owner_person_id?._id ?? '')
+      : i4bRow?.owner_person_id;
   expectEqual(
     'the refused reassignment left the original owner in place',
-    i4bRow?.owner_person_id,
+    i4bRowOwnerId,
     i4bOwnerId
   );
 
