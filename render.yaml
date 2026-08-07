@@ -10,7 +10,17 @@ services:
     runtime: node
     plan: free
     region: singapore
-    buildCommand: npm ci && npm run build
+    # --include=dev is load-bearing. Render applies the service's env vars to
+    # the BUILD as well as the runtime, and NODE_ENV=production makes npm skip
+    # devDependencies — which is where @types/node, @types/express,
+    # @types/bcrypt and typescript itself live. Without it the build dies in
+    # hundreds of "Cannot find name 'process'" / "Could not find a declaration
+    # file for module 'express'" errors that look like broken source but are
+    # really an empty node_modules/@types.
+    #
+    # The prune afterwards puts the runtime back to production-only, so the
+    # deployed instance carries no build tooling.
+    buildCommand: npm ci --include=dev && npm run build && npm prune --omit=dev
     # Direct node, not `npm start`: npm swallows SIGTERM, so the graceful
     # shutdown in src/server.ts would never run on a deploy or scale-down.
     startCommand: node dist/server.js

@@ -57,6 +57,23 @@ other, not both.
 4. Health check is `GET /health`; Render restarts the service if it stops
    returning 200.
 
+### If the build fails with hundreds of missing-type errors
+
+```
+error TS2591: Cannot find name 'process'
+error TS7016: Could not find a declaration file for module 'express'
+```
+
+This is not broken source — it is an empty `node_modules/@types`. Render applies
+the service's environment variables to the **build** as well as the runtime, and
+`NODE_ENV=production` makes npm skip devDependencies, which is where every
+`@types/*` package and TypeScript itself live. The `buildCommand` in
+`render.yaml` therefore uses `npm ci --include=dev`, then prunes back to
+production-only after `tsc` has run.
+
+Reproduce it locally with `NODE_ENV=production npm ci` and check whether
+`node_modules/@types` exists.
+
 Generate fresh secrets with:
 
 ```bash
