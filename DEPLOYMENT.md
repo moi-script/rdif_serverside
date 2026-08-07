@@ -208,6 +208,7 @@ installed with `--omit=dev`. Use the compiled equivalents:
 | Local development | `npm run seed:test` |
 | From your machine against the deployed database, reading `.env.production` | `npm run build && npm run seed:test:atlas` |
 | On a host that already has the production environment in `process.env` | `npm run build && npm run seed:test:prod` |
+| Verify registration, logins and password changes (local, server running) | `npm run verify:registration` |
 
 `seed:test:atlas` passes the env file as a dotenv preload argument rather than a
 shell variable prefix, so it behaves the same in PowerShell and bash.
