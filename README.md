@@ -7,9 +7,13 @@ and reporting.
 Companion frontend: [`ncst_rfid_access`](https://github.com/moi-script/ncst_rfid_access).
 See `../userpage/ncst_rfid_serverside_flow.md` for the full API blueprint.
 
+Deploying? See **[`DEPLOYMENT.md`](DEPLOYMENT.md)** — Render + Vercel
+walkthrough, the production environment reference, and which seed script to run
+where.
+
 ## Tech stack
 
-- **Node.js 20+ / Express** (TypeScript)
+- **Node.js 22+ / Express** (TypeScript)
 - **MongoDB / Mongoose**
 - **JWT** auth (15m access token in body, 7d refresh token in an httpOnly cookie with rotation)
 - **bcrypt** password hashing, **Zod** validation

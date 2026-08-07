@@ -20,6 +20,28 @@ const envSchema = z.object({
   LOGIN_RATE_LIMIT_MAX: z.coerce.number().default(10),
   SCAN_RATE_LIMIT_MAX: z.coerce.number().default(60),
   COOKIE_SECRET: z.string().default('cookie_secret'),
+  // The refresh cookie's SameSite policy. 'strict' is right when the client is
+  // served from the same site as the API. It is WRONG for the production
+  // split-host deployment (Next.js on Vercel, API on Render): the browser
+  // treats those as different sites, drops the cookie on every cross-site
+  // request, and POST /auth/refresh then fails with "No refresh token" — the
+  // session silently dies the moment the access token expires. 'none' is what
+  // makes a cross-site cookie travel, and the browser only honours it on a
+  // Secure cookie, which is why the refine below refuses the combination that
+  // would be dropped anyway.
+  COOKIE_SAMESITE: z.enum(['strict', 'lax', 'none']).default('strict'),
+  // Forces the Secure flag independently of NODE_ENV. Needed because a
+  // production API is not always the process that terminates TLS.
+  COOKIE_SECURE: z
+    .enum(['true', 'false'])
+    .optional()
+    .transform((v) => (v === undefined ? undefined : v === 'true')),
+  // How many reverse proxies sit in front of this process. Render, Railway,
+  // Fly and any nginx put exactly one there. Left at 0, Express reads the
+  // socket address instead of X-Forwarded-For, so every client looks like the
+  // proxy: the rate limiters then throttle all users as a single bucket and
+  // req.ip is useless in logs.
+  TRUST_PROXY: z.coerce.number().int().min(0).default(0),
   LATE_CUTOFF_TIME: z.string().default('08:00'),
   OCCUPANCY_RESET_TIME: z
     .string()
@@ -75,8 +97,27 @@ if (!parsed.success) {
   process.exit(1);
 }
 
+const isProd = parsed.data.NODE_ENV === 'production';
+// Secure defaults to on in production. An explicit COOKIE_SECURE wins, so a
+// deployment that genuinely terminates plain HTTP can opt out knowingly.
+const cookieSecure = parsed.data.COOKIE_SECURE ?? isProd;
+
+// SameSite=None without Secure is discarded by every current browser, which
+// would look exactly like the cross-site bug this setting exists to fix.
+// Refuse at boot rather than ship a login that drops its own session.
+if (parsed.data.COOKIE_SAMESITE === 'none' && !cookieSecure) {
+  console.error(
+    'Invalid environment configuration: COOKIE_SAMESITE=none requires a Secure cookie. ' +
+      'Set COOKIE_SECURE=true (and serve the API over HTTPS).'
+  );
+  process.exit(1);
+}
+
 export const env = {
   ...parsed.data,
-  ALLOWED_ORIGINS_LIST: parsed.data.ALLOWED_ORIGINS.split(',').map((o) => o.trim()),
-  isProd: parsed.data.NODE_ENV === 'production',
+  ALLOWED_ORIGINS_LIST: parsed.data.ALLOWED_ORIGINS.split(',')
+    .map((o) => o.trim())
+    .filter(Boolean),
+  COOKIE_SECURE: cookieSecure,
+  isProd,
 };
