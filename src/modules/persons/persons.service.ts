@@ -168,7 +168,21 @@ export const personService = {
       // referencing it, so a HARD delete is correct: softDelete would leave the
       // id_number and rfid_uid uniqueness slots occupied and block the
       // operator's immediate retry.
-      await PersonModel.deleteOne({ _id: person._id });
+      //
+      // The delete itself can fail too — the same infrastructure trouble that
+      // broke the user insert makes a second write failing quite likely — and
+      // if it throws here, that error must not replace the original: it would
+      // hide the real cause and leave the orphaned person untraceable. Log the
+      // orphan's id and always rethrow the ORIGINAL error.
+      try {
+        await PersonModel.deleteOne({ _id: person._id });
+      } catch (cleanupErr) {
+        console.error(
+          `[persons] FAILED to roll back orphaned person ${person._id} after a user-create ` +
+            'failure — this person has no login and must be cleaned up manually.',
+          cleanupErr
+        );
+      }
       throw err;
     }
 

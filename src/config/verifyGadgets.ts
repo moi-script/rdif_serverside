@@ -419,7 +419,6 @@ async function main(): Promise<void> {
     const atParking = await tap(parkingKey, ownerUid, 'entry');
     expectEqual('no gadget list at a vehicle gate', atParking.person?.gadgets, undefined);
     console.log('\n== registered devices appear on the owner\'s overview ==');
-    // --- registered devices appear on the owner's overview ---
     const owner = await request(superadmin, 'GET', '/persons?search=2025-0001');
     const ownerRows = (owner.json.data ?? []) as { _id: string }[];
     expectEqual('seeded student found', ownerRows.length > 0, true);

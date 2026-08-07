@@ -88,7 +88,7 @@ export async function changePassword(
   if (!user) throw new ApiError('INVALID_CREDENTIALS');
 
   const ok = await bcrypt.compare(currentPassword, user.password_hash);
-  if (!ok) throw new ApiError('INVALID_CREDENTIALS');
+  if (!ok) throw new ApiError('INVALID_CREDENTIALS', 'Current password is incorrect');
 
   // Without this, a forced change is satisfiable by re-entering the password
   // the admin chose, which is exactly what must_change_password exists to stop.

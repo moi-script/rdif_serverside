@@ -6,7 +6,12 @@
  * Run with: npm run verify:registration
  *
  * Restores everything it changes: every person it creates is soft-deleted in a
- * `finally`, so re-running the harness is safe.
+ * `finally`, and every LOGIN created along with a person is hard-deleted
+ * (DELETE /users/:id) in the same `finally`, so re-running the harness is
+ * safe. Soft-deleting the person alone is not enough — persons.service's
+ * softDelete deactivates the linked login but never sets the User's
+ * deleted_at, so it would stay visible in GET /users forever and permanently
+ * exclude itself from bulk reactivation checks (see verifyRoles).
  */
 import { installVerifyBypass } from './verifyBypass';
 
@@ -84,6 +89,11 @@ async function main(): Promise<void> {
   const admin = await login('testadmin', 'Admin@123');
   const registrar = await login('testregistrar', 'Registrar@123');
   const created: string[] = [];
+  // Usernames of every login this run creates (currently just STUDENT_ID via
+  // the first registration), so the finally block can hard-delete them and
+  // leave no dead row behind. See the docblock above for why a soft-delete of
+  // the person alone is not sufficient.
+  const createdLogins: string[] = [];
 
   try {
     // --- a registrar registering a student with a password gets a login ---
@@ -97,6 +107,7 @@ async function main(): Promise<void> {
     const person = reg.json.data as { _id?: string; login_created?: boolean } | undefined;
     expectEqual('response reports login_created', person?.login_created, true);
     if (person?._id) created.push(person._id);
+    if (person?.login_created) createdLogins.push(STUDENT_ID);
 
     // --- that login actually works, and carries the forced-change flag ---
     const auth = await request(null, 'POST', '/auth/login', {
@@ -220,6 +231,21 @@ async function main(): Promise<void> {
     });
     expectEqual('unauthenticated change -> 401', anon.status, 401);
   } finally {
+    // Hard-delete the login(s) FIRST, while the person row (and its search
+    // fields) still exist to find them by. persons.service's softDelete
+    // (triggered by DELETE /persons/:id below) deactivates the login but
+    // never sets the User's deleted_at, so without this the row would stay
+    // visible in GET /users forever and permanently excluded from bulk
+    // reactivation — exactly the leak that broke verify:roles.
+    for (const username of createdLogins) {
+      const found = await request(admin, 'GET', `/users?search=${encodeURIComponent(username)}`);
+      const rows = (found.json.data ?? []) as { id?: string; _id?: string; username?: string }[];
+      const row = rows.find((r) => r.username === username);
+      const userId = row?.id ?? row?._id;
+      if (userId) {
+        await request(admin, 'DELETE', `/users/${userId}`).catch(() => undefined);
+      }
+    }
     for (const id of created) {
       await request(admin, 'DELETE', `/persons/${id}`).catch(() => undefined);
     }
