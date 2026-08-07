@@ -23,6 +23,7 @@
     "verify:passback": "ts-node src/config/verifyPassback.ts",
     "verify:vehicles": "ts-node src/config/verifyVehicles.ts",
     "verify:gadgets": "ts-node src/config/verifyGadgets.ts",
+    "verify:registration": "ts-node src/config/verifyRegistration.ts",
     "lint": "eslint src --ext .ts"
   },
   "dependencies": {
