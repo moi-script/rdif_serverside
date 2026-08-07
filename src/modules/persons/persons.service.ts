@@ -1,10 +1,11 @@
 import { FilterQuery, Types } from 'mongoose';
+import bcrypt from 'bcrypt';
 import { personRepo } from './persons.repository';
 import { IPerson, PersonModel } from './persons.model';
 import { ApiError } from '../../utils/ApiError';
 import { getPagination, buildMeta } from '../../utils/pagination';
-import { ROLES, personDomain } from '../../constants/roles';
-import { Actor, assertCanWrite, assertCanActOn } from '../../utils/authority';
+import { ROLES, personDomain, type Role } from '../../constants/roles';
+import { Actor, assertCanWrite, assertCanActOn, assertCanCreateRole } from '../../utils/authority';
 import { userRepo } from '../users/users.repository';
 import { blockedCardRepo } from '../blockedCards/blockedCards.repository';
 import { VehicleModel } from '../vehicles/vehicles.model';
@@ -39,6 +40,17 @@ function buildListFilter(query: ListQuery): FilterQuery<IPerson> {
     filter.$or = [{ full_name: rx }, { id_number: rx }];
   }
   return filter;
+}
+
+const BCRYPT_ROUNDS = 12;
+
+/**
+ * A person's type decides what kind of login they get. Employees share the
+ * staff role because RANK treats them identically and there is no separate
+ * employee role in ROLES.
+ */
+function roleForPersonType(type: 'student' | 'staff' | 'employee'): Role {
+  return type === 'student' ? ROLES.STUDENT : ROLES.STAFF;
 }
 
 export const personService = {
@@ -98,31 +110,83 @@ export const personService = {
     return person;
   },
 
-  async create(data: Partial<IPerson>, actor: Actor) {
+  async create(data: Partial<IPerson> & { password?: string }, actor: Actor) {
     if (!data.type) throw new ApiError('VALIDATION_ERROR', 'type is required');
     assertCanWrite(actor, personDomain(data.type));
 
-    if (data.id_number) {
-      const dup = await personRepo.findByIdNumber(data.id_number);
+    const { password, ...personData } = data;
+    const role = roleForPersonType(data.type);
+    // Rank check BEFORE any write. Domain authority (above) does not imply the
+    // authority to mint a login at that level.
+    if (password) assertCanCreateRole(actor, role);
+
+    if (personData.id_number) {
+      const dup = await personRepo.findByIdNumber(personData.id_number);
       if (dup) throw new ApiError('DUPLICATE_ID');
     }
-    if (data.rfid_uid) {
-      const existing = await personRepo.findByRfid(data.rfid_uid);
+    if (personData.rfid_uid) {
+      const existing = await personRepo.findByRfid(personData.rfid_uid);
       if (existing) throw new ApiError('DUPLICATE_RFID');
       // The reverse of the check in vehicleService.create: a UID belongs to a
       // person OR a vehicle, never both.
-      const vehicleWithRfid = await vehicleRepo.findByRfid(data.rfid_uid);
+      const vehicleWithRfid = await vehicleRepo.findByRfid(personData.rfid_uid);
       if (vehicleWithRfid) {
         throw new ApiError('DUPLICATE_RFID', 'That RFID is already assigned to a vehicle');
       }
       // A block enforced only at the barrier would be no block at all: a
       // retired UID could be re-registered here and would then resolve
       // normally at the gate. See scan.service.tap for the other half.
-      if (await blockedCardRepo.isBlocked(data.rfid_uid)) throw new ApiError('CARD_BLOCKED');
+      if (await blockedCardRepo.isBlocked(personData.rfid_uid)) throw new ApiError('CARD_BLOCKED');
     } else {
-      data.status = data.status ?? 'pending';
+      personData.status = personData.status ?? 'pending';
     }
-    return personRepo.create(data);
+
+    // Username availability joins the pre-checks above rather than waiting for
+    // the insert, so the realistic conflict fails with nothing written. This
+    // codebase uses no transactions (grep startSession/withTransaction: none),
+    // so the pre-check IS the atomicity strategy.
+    if (password) {
+      const takenBy = await userRepo.findByUsername(String(personData.id_number));
+      if (takenBy) throw new ApiError('DUPLICATE_USERNAME');
+    }
+
+    const person = await personRepo.create(personData);
+    if (!password) return { ...person.toObject(), login_created: false };
+
+    try {
+      await userRepo.create({
+        username: String(personData.id_number),
+        password_hash: await bcrypt.hash(password, BCRYPT_ROUNDS),
+        role,
+        person_id: person._id,
+        must_change_password: true,
+        is_active: true,
+      });
+    } catch (err) {
+      // Only an infrastructure failure reaches here — the username conflict was
+      // already ruled out. The person is milliseconds old with nothing
+      // referencing it, so a HARD delete is correct: softDelete would leave the
+      // id_number and rfid_uid uniqueness slots occupied and block the
+      // operator's immediate retry.
+      //
+      // The delete itself can fail too — the same infrastructure trouble that
+      // broke the user insert makes a second write failing quite likely — and
+      // if it throws here, that error must not replace the original: it would
+      // hide the real cause and leave the orphaned person untraceable. Log the
+      // orphan's id and always rethrow the ORIGINAL error.
+      try {
+        await PersonModel.deleteOne({ _id: person._id });
+      } catch (cleanupErr) {
+        console.error(
+          `[persons] FAILED to roll back orphaned person ${person._id} after a user-create ` +
+            'failure — this person has no login and must be cleaned up manually.',
+          cleanupErr
+        );
+      }
+      throw err;
+    }
+
+    return { ...person.toObject(), login_created: true };
   },
 
   async import(rows: Partial<IPerson>[], actor: Actor) {

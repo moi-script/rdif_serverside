@@ -223,13 +223,18 @@ export const dashboardService = {
 
   async userView(personId: string) {
     const oid = new Types.ObjectId(personId);
-    const [person, vehicles, today, recent, statusAgg, scans] = await Promise.all([
+    const [person, vehicles, gadgets, today, recent, statusAgg, scans] = await Promise.all([
       // deleted_at excluded here too: a soft-deleted person's login is also
       // deactivated (see personService.softDelete), so this only matters for
       // an admin looking up /:id/overview by hand — it must 404 the same way
       // GET /persons/:id does, not resurrect a deleted person's profile.
       PersonModel.findOne({ _id: personId, deleted_at: null }).lean(),
       VehicleModel.find({ owner_person_id: personId }).sort({ createdAt: -1 }).lean(),
+      // Inactive rows included on purpose. A replaced device is deactivated
+      // rather than deleted so its history survives (gadgets.model.ts:18-22),
+      // and "this laptop was swapped" is exactly what someone opening a profile
+      // is trying to find out. The status badge distinguishes them.
+      GadgetModel.find({ owner_person_id: personId }).sort({ createdAt: -1 }).lean(),
       AttendanceModel.findOne({ person_id: personId, date: todayKey() }).lean(),
       AttendanceModel.find({ person_id: personId }).sort({ date: -1 }).limit(7).lean(),
       AttendanceModel.aggregate([
@@ -284,6 +289,12 @@ export const dashboardService = {
         vehicle_model: vehicle.vehicle_model ?? null,
         rfid_uid: vehicle.rfid_uid,
         status: vehicle.status,
+      })),
+      gadgets: gadgets.map((gadget) => ({
+        gadget_type: gadget.gadget_type,
+        brand_model: gadget.brand_model,
+        serial_number: gadget.serial_number,
+        status: gadget.status,
       })),
       recent_scans: scans,
     };

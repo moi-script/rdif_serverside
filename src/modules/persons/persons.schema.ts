@@ -12,6 +12,11 @@ export const createPersonSchema = z.object({
     .regex(/^[0-9A-Fa-f]{6,32}$/, 'rfid_uid must be 6-32 hex characters')
     .optional(),
   status: z.enum(['active', 'inactive', 'pending']).optional(),
+  // Optional here, required by the registration form. Bulk import shares this
+  // schema and has no password column, so a mandatory field would break it —
+  // and the alternative, plaintext passwords in a CSV, is worse than leaving
+  // imported rows login-less. See importPersonsSchema below.
+  password: z.string().min(8).optional(),
 });
 
 // Both fields are omitted from PATCH for different reasons:
@@ -32,5 +37,5 @@ export const reassignRfidSchema = z.object({
 });
 
 export const importPersonsSchema = z.object({
-  rows: z.array(createPersonSchema).min(1).max(500),
+  rows: z.array(createPersonSchema.omit({ password: true })).min(1).max(500),
 });
