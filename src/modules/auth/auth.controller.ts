@@ -39,3 +39,13 @@ export const logoutController = asyncHandler(async (req: Request, res: Response)
   res.clearCookie(REFRESH_COOKIE, { ...cookieOptions, maxAge: undefined });
   sendSuccess(res, { message: 'Logged out' });
 });
+
+export const changePasswordController = asyncHandler(async (req: Request, res: Response) => {
+  if (!req.user) throw new ApiError('UNAUTHORIZED', 'Authentication required');
+  const { currentPassword, newPassword } = req.body;
+  await authService.changePassword(req.user.userId, currentPassword, newPassword);
+  // The refresh cookie is now dead server-side; clear it so the browser stops
+  // sending a token that can only fail.
+  res.clearCookie(REFRESH_COOKIE, { ...cookieOptions, maxAge: undefined });
+  sendSuccess(res, { message: 'Password changed' });
+});

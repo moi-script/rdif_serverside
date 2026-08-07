@@ -78,6 +78,7 @@ const STAMP = Date.now().toString().slice(-8);
 const STUDENT_ID = `T${STAMP}`;
 const STAFF_ID = `S${STAMP}`;
 const PASSWORD = 'RegTest@123';
+const NEW_PASSWORD = 'RegTest@456';
 
 async function main(): Promise<void> {
   const admin = await login('testadmin', 'Admin@123');
@@ -171,6 +172,53 @@ async function main(): Promise<void> {
     const bare = noPass.json.data as { _id?: string; login_created?: boolean } | undefined;
     expectEqual('no login reported', bare?.login_created, false);
     if (bare?._id) created.push(bare._id);
+
+    // --- change password: wrong current password is refused ---
+    const studentToken = await login(STUDENT_ID, PASSWORD);
+    const wrongCurrent = await request(studentToken, 'POST', '/auth/change-password', {
+      currentPassword: 'NotMyPassword@1',
+      newPassword: NEW_PASSWORD,
+    });
+    expectEqual('change with wrong current password -> 401', wrongCurrent.status, 401);
+
+    // --- reusing the current password defeats the forced change ---
+    const sameAgain = await request(studentToken, 'POST', '/auth/change-password', {
+      currentPassword: PASSWORD,
+      newPassword: PASSWORD,
+    });
+    expectEqual('reusing the current password -> 422', sameAgain.status, VALIDATION);
+
+    // --- the happy path ---
+    const changed = await request(studentToken, 'POST', '/auth/change-password', {
+      currentPassword: PASSWORD,
+      newPassword: NEW_PASSWORD,
+    });
+    expectEqual('change password -> 200', changed.status, OK);
+
+    // --- the old password no longer works ---
+    const oldPass = await request(null, 'POST', '/auth/login', {
+      username: STUDENT_ID,
+      password: PASSWORD,
+    });
+    expectEqual('old password rejected after change', oldPass.status, 401);
+
+    // --- the new one does, and the forced-change flag is cleared ---
+    const newPass = await request(null, 'POST', '/auth/login', {
+      username: STUDENT_ID,
+      password: NEW_PASSWORD,
+    });
+    expectEqual('new password accepted', newPass.status, OK);
+    const after = newPass.json.data as
+      | { user?: { mustChangePassword?: boolean } }
+      | undefined;
+    expectEqual('must_change_password cleared', after?.user?.mustChangePassword, false);
+
+    // --- an anonymous caller cannot reach the endpoint at all ---
+    const anon = await request(null, 'POST', '/auth/change-password', {
+      currentPassword: PASSWORD,
+      newPassword: NEW_PASSWORD,
+    });
+    expectEqual('unauthenticated change -> 401', anon.status, 401);
   } finally {
     for (const id of created) {
       await request(admin, 'DELETE', `/persons/${id}`).catch(() => undefined);

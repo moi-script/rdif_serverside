@@ -76,3 +76,31 @@ export async function refresh(oldToken: string): Promise<{ accessToken: string; 
 export async function logout(userId: string): Promise<void> {
   await UserModel.findByIdAndUpdate(userId, { refreshTokenHash: null });
 }
+
+export async function changePassword(
+  userId: string,
+  currentPassword: string,
+  newPassword: string
+): Promise<void> {
+  const user = await UserModel.findOne({ _id: userId, is_active: true });
+  // Same code as a failed login, deliberately: a distinct "no such user" here
+  // would turn an authenticated endpoint into a probe for valid user ids.
+  if (!user) throw new ApiError('INVALID_CREDENTIALS');
+
+  const ok = await bcrypt.compare(currentPassword, user.password_hash);
+  if (!ok) throw new ApiError('INVALID_CREDENTIALS');
+
+  // Without this, a forced change is satisfiable by re-entering the password
+  // the admin chose, which is exactly what must_change_password exists to stop.
+  const unchanged = await bcrypt.compare(newPassword, user.password_hash);
+  if (unchanged) {
+    throw new ApiError('VALIDATION_ERROR', 'New password must differ from the current one');
+  }
+
+  user.password_hash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+  user.must_change_password = false;
+  // Same invalidation resetPassword performs: a session opened with the old
+  // credential must not be able to refresh itself past the change.
+  user.refreshTokenHash = null;
+  await user.save();
+}
