@@ -6,10 +6,15 @@ import { env } from '../../config/env';
 import * as authService from './auth.service';
 
 const REFRESH_COOKIE = 'refreshToken';
+// Both flags are environment-driven because the same code serves two
+// topologies: a same-origin dev setup (strict, insecure over localhost) and a
+// split-host production deployment where the client is on a different site
+// from the API and the cookie only travels as SameSite=None; Secure. See the
+// COOKIE_SAMESITE comment in config/env.ts.
 const cookieOptions = {
   httpOnly: true,
-  secure: env.isProd,
-  sameSite: 'strict' as const,
+  secure: env.COOKIE_SECURE,
+  sameSite: env.COOKIE_SAMESITE,
   path: '/',
   maxAge: 7 * 24 * 60 * 60 * 1000,
 };

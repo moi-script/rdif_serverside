@@ -25,6 +25,13 @@ import { occupancyRoutes } from './modules/occupancy/occupancy.routes';
 export function createApp(): Express {
   const app = express();
 
+  // Behind Render/Railway/nginx the client address only exists in
+  // X-Forwarded-For. Without this the rate limiters bucket every request in
+  // the world under the proxy's IP. The value is a hop count, not a boolean:
+  // `true` would trust the whole chain and let a client spoof its own IP past
+  // the login limiter.
+  if (env.TRUST_PROXY > 0) app.set('trust proxy', env.TRUST_PROXY);
+
   app.use(helmet());
   app.use(
     cors({
