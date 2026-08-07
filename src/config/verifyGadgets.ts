@@ -418,6 +418,43 @@ async function main(): Promise<void> {
     // either way the gadget block must not fire.
     const atParking = await tap(parkingKey, ownerUid, 'entry');
     expectEqual('no gadget list at a vehicle gate', atParking.person?.gadgets, undefined);
+    console.log('\n== registered devices appear on the owner\'s overview ==');
+    // --- registered devices appear on the owner's overview ---
+    const owner = await request(superadmin, 'GET', '/persons?search=2025-0001');
+    const ownerRows = (owner.json.data ?? []) as { _id: string }[];
+    expectEqual('seeded student found', ownerRows.length > 0, true);
+    const seededOwnerId = ownerRows[0]?._id;
+
+    const overview = await request(superadmin, 'GET', `/persons/${seededOwnerId}/overview`);
+    expectEqual('overview -> 200', overview.status, OK);
+    const gadgetsOnOverview = ((overview.json.data as Record<string, unknown>)?.gadgets ?? []) as {
+      serial_number?: string;
+      brand_model?: string;
+      status?: string;
+    }[];
+    expectEqual('overview includes gadgets', Array.isArray(gadgetsOnOverview), true);
+    expectEqual(
+      'seeded laptop is listed',
+      gadgetsOnOverview.some((g) => g.serial_number === '5CD1234ABC'),
+      true
+    );
+    expectEqual(
+      'listed device carries its model',
+      gadgetsOnOverview.find((g) => g.serial_number === '5CD1234ABC')?.brand_model,
+      'Dell Latitude 5420'
+    );
+
+    // --- the student sees their own devices on their own dashboard ---
+    const studentToken = await login('2025-0001', 'Student@123');
+    const dash = await request(studentToken, 'GET', '/dashboard');
+    const myGadgets = ((dash.json.data as Record<string, unknown>)?.gadgets ?? []) as {
+      serial_number?: string;
+    }[];
+    expectEqual(
+      'student dashboard lists their own device',
+      myGadgets.some((g) => g.serial_number === '5CD1234ABC'),
+      true
+    );
   } finally {
     // Soft-deletes the person and cascades every registered gadget to inactive,
     // the same way it cascades vehicles. The gadget rows themselves survive, by
